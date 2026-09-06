@@ -59,4 +59,9 @@ tools = get_available_tools()
 - `sandbox_list_files(path=".")`：列出沙箱目录结构（read）
 - `sandbox_read_file(path)`：读取沙箱内文本文件（read）
 
+会话创建时还会注入绑定工作区的 Git 只读工具：
+
+- `git_status()`：查看当前分支和未提交文件摘要（read）
+- `git_diff(path)`：查看指定改动文件相对 HEAD 的 unified diff（read）
+
 > 说明：mock 模式指「规划/模型输出确定」，工具本身是真实读写文件系统，不是假实现。

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from .commands import demo, evaluate, runtime, sandbox, serve
+from .commands import demo, evaluate, ruff, runtime, sandbox, serve
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo.register(subparsers)
     evaluate.register(subparsers)
+    ruff.register(subparsers)
     sandbox.register(subparsers)
     serve.register(subparsers)
     runtime.register(subparsers)

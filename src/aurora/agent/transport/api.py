@@ -14,6 +14,7 @@ from aurora.text import sanitize_text, sanitize_value
 from ..mcp import McpClientError, McpServerConfig
 from ..runtime import AgentRuntime, RunUpdate, validate_workspace
 from ..sandbox import SandboxMode
+from ..store import GitRepository, GitView
 
 
 class MethodNotFoundError(ValueError):
@@ -219,10 +220,14 @@ class RuntimeApi:
                 "protocolVersion": str(PROTOCOL_VERSION),
                 "capabilities": [
                     "workspace.validate",
+                    "workspace.git.initialize",
                     "session.create",
                     "run.start",
                     "run.resume",
                     "session.close",
+                    "git.status",
+                    "git.diff",
+                    "git.rollback",
                     "mcp.server.connect",
                     "mcp.server.list",
                     "mcp.server.disconnect",
@@ -234,6 +239,11 @@ class RuntimeApi:
             }, []
         if method == "workspace.validate":
             return validate_workspace(_required_string(params, "path")).to_dict(), []
+        if method == "workspace.git.initialize":
+            path = _required_string(params, "path")
+            repository = GitRepository.ensure(path)
+            repository.close()
+            return validate_workspace(path).to_dict(), []
         if method == "mcp.server.connect":
             return self._runtime.connect_mcp_server(McpServerConfig.from_mapping(params)), []
         if method == "mcp.server.list":
@@ -288,6 +298,22 @@ class RuntimeApi:
                 _optional_string(params, "interruptId"),
             )
             return _frames_for_update(update)
+        if method == "git.status":
+            session = self._runtime.get_session(_required_string(params, "sessionId"))
+            return session.git_status(
+                _git_view(params.get("view", "workspace")),
+                _optional_string(params, "runId"),
+            ), []
+        if method == "git.diff":
+            session = self._runtime.get_session(_required_string(params, "sessionId"))
+            return session.git_diff(
+                _required_string(params, "path"),
+                _git_view(params.get("view", "workspace")),
+                _optional_string(params, "runId"),
+            ), []
+        if method == "git.rollback":
+            session = self._runtime.get_session(_required_string(params, "sessionId"))
+            return session.git_rollback(_required_string(params, "runId")), []
         if method == "session.close":
             session_id = _required_string(params, "sessionId")
             self._runtime.close_session(session_id)
@@ -381,6 +407,13 @@ def _sandbox_mode(value: Any) -> SandboxMode:
     """校验并返回沙箱模式。"""
     if value not in {"read-only", "workspace-write", "danger-full-access"}:
         raise ValueError("sandboxMode 无效")
+    return value
+
+
+def _git_view(value: Any) -> GitView:
+    """校验 Git 差异视图。"""
+    if value not in {"run", "workspace"}:
+        raise ValueError("view 必须是 run 或 workspace")
     return value
 
 

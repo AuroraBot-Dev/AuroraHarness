@@ -150,6 +150,67 @@ def test_ndjson_server_accepts_desktop_wire_envelope():
     assert frame["request_id"] == "req_1"
     assert frame["ok"] is True
     assert "workspace.validate" in frame["result"]["capabilities"]
+    assert "git.status" in frame["result"]["capabilities"]
+
+
+def test_runtime_git_protocol_initializes_reads_and_rolls_back(tmp_path):
+    api = RuntimeApi(make_runtime(task("write_file", {"path": "agent.txt", "content": "ok"})))
+    initialized = api.handle(
+        {"id": "init", "method": "workspace.git.initialize", "params": {"path": str(tmp_path)}}
+    )[0]["result"]
+    assert initialized["isGitRepository"] is True
+    created = api.handle(
+        {"id": "create", "method": "session.create", "params": {"workspacePath": str(tmp_path)}}
+    )[0]["result"]
+    session_id = created["sessionId"]
+    started = api.handle(
+        {"id": "run", "method": "run.start", "params": {"sessionId": session_id, "goal": "写文件"}}
+    )
+    pending = started[1]["data"]
+    completed = api.handle(
+        {
+            "id": "resume",
+            "method": "run.resume",
+            "params": {
+                "sessionId": session_id,
+                "runId": pending["runId"],
+                "interruptId": pending["interruptId"],
+                "response": {"approved": True},
+            },
+        }
+    )[0]["result"]
+    run_id = completed["runId"]
+    status = api.handle(
+        {
+            "id": "status",
+            "method": "git.status",
+            "params": {"sessionId": session_id, "view": "run", "runId": run_id},
+        }
+    )[0]["result"]
+    assert status["files"][0]["path"] == "agent.txt"
+    diff = api.handle(
+        {
+            "id": "diff",
+            "method": "git.diff",
+            "params": {
+                "sessionId": session_id,
+                "view": "run",
+                "runId": run_id,
+                "path": "agent.txt",
+            },
+        }
+    )[0]["result"]
+    assert "+ok" in diff["content"]
+    rolled_back = api.handle(
+        {
+            "id": "rollback",
+            "method": "git.rollback",
+            "params": {"sessionId": session_id, "runId": run_id},
+        }
+    )[0]["result"]
+    assert rolled_back["reverted"] is True
+    assert not (tmp_path / "agent.txt").exists()
+    api.close()
 
 
 def test_websocket_server_returns_protocol_frame():

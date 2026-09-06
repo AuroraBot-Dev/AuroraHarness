@@ -26,6 +26,7 @@ from .mcp import (
 from .model_access import build_llm
 from .safety import build_gate
 from .sandbox import Sandbox, SandboxMode, create_sandbox
+from .store import GitRepository, GitView, build_git_tools
 from .tools import Tool, build_sandbox_tools, get_available_tools
 
 
@@ -99,7 +100,7 @@ def validate_workspace(path: str | Path) -> WorkspaceInfo:
         path=str(candidate),
         name=candidate.name,
         is_directory=True,
-        is_git_repository=(candidate / ".git").exists(),
+        is_git_repository=GitRepository.is_repository(candidate),
         readable=readable,
         writable=os.access(candidate, os.W_OK),
     )
@@ -116,12 +117,14 @@ class AgentSession:
         graph: Any,
         llm: Any,
         planner: Any,
+        repository: GitRepository,
     ) -> None:
         self.id = session_id
         self.workspace = workspace
         self.sandbox = sandbox
         self.llm = llm
         self.planner = planner
+        self.repository = repository
         self._graph = graph
         self._run_ids: set[str] = set()
 
@@ -136,11 +139,19 @@ class AgentSession:
             raise ValueError("目标不能为空")
         run_id = uuid4().hex
         self._run_ids.add(run_id)
-        if on_progress is None:
-            state = self._graph.invoke({"goal": clean_goal}, self._config(run_id))
-            return self._update(run_id, state)
-        on_progress(run_id, "run.started", {"goal": clean_goal})
-        return self._stream(run_id, {"goal": clean_goal}, on_progress)
+        self.repository.begin_run(run_id)
+        try:
+            if on_progress is None:
+                state = self._graph.invoke({"goal": clean_goal}, self._config(run_id))
+                update = self._update(run_id, state)
+            else:
+                on_progress(run_id, "run.started", {"goal": clean_goal})
+                update = self._stream(run_id, {"goal": clean_goal}, on_progress)
+        except Exception:
+            self.repository.finish_run(run_id, "failed")
+            raise
+        self.repository.finish_run(run_id, update.status)
+        return update
 
     def resume(
         self,
@@ -155,11 +166,36 @@ class AgentSession:
         clean_response = sanitize_value(response)
         resume_value = {interrupt_id: clean_response} if interrupt_id else clean_response
         command = Command(resume=resume_value)
-        if on_progress is None:
-            state = self._graph.invoke(command, self._config(run_id))
-            return self._update(run_id, state)
-        on_progress(run_id, "run.resumed", {})
-        return self._stream(run_id, command, on_progress)
+        try:
+            if on_progress is None:
+                state = self._graph.invoke(command, self._config(run_id))
+                update = self._update(run_id, state)
+            else:
+                on_progress(run_id, "run.resumed", {})
+                update = self._stream(run_id, command, on_progress)
+        except Exception:
+            self.repository.finish_run(run_id, "failed")
+            raise
+        self.repository.finish_run(run_id, update.status)
+        return update
+
+    def git_status(self, view: GitView, run_id: str | None = None) -> dict[str, Any]:
+        """返回会话工作区的 Git 状态。"""
+        return self.repository.status(view, run_id)
+
+    def git_diff(self, path: str, view: GitView, run_id: str | None = None) -> dict[str, Any]:
+        """返回会话工作区的单文件差异。"""
+        return self.repository.diff(path, view, run_id)
+
+    def git_rollback(self, run_id: str) -> dict[str, Any]:
+        """回滚最近一轮 Agent 改动。"""
+        if run_id not in self._run_ids:
+            raise ValueError(f"运行不存在或不属于当前会话: {run_id}")
+        return self.repository.rollback(run_id)
+
+    def close(self) -> None:
+        """释放会话临时资源。"""
+        self.repository.close()
 
     def _stream(
         self,
@@ -246,10 +282,12 @@ class AgentRuntime:
         feedback_sink: Callable[[DelegationState], None] | None = None,
     ) -> AgentSession:
         """为指定工作区创建独立 Agent 会话。"""
+        repository = GitRepository.ensure(workspace_path)
         workspace = validate_workspace(workspace_path)
         sandbox = self._sandbox_factory(root=workspace.path, mode=sandbox_mode)
         tools = get_available_tools()
         tools.update(build_sandbox_tools(sandbox))
+        tools.update(build_git_tools(repository))
         for server_tools in self._mcp_tools.values():
             tools.update(server_tools)
         llm = self._llm_factory()
@@ -265,7 +303,7 @@ class AgentRuntime:
             feedback_sink=feedback_sink,
         )
         session_id = uuid4().hex
-        session = AgentSession(session_id, workspace, sandbox, graph, llm, planner)
+        session = AgentSession(session_id, workspace, sandbox, graph, llm, planner, repository)
         self._sessions[session_id] = session
         return session
 
@@ -278,8 +316,10 @@ class AgentRuntime:
 
     def close_session(self, session_id: str) -> None:
         """关闭并移除会话。"""
-        if self._sessions.pop(session_id, None) is None:
+        session = self._sessions.pop(session_id, None)
+        if session is None:
             raise ValueError(f"会话不存在: {session_id}")
+        session.close()
 
     def connect_mcp_server(self, config: McpServerConfig) -> dict[str, Any]:
         """连接 MCP Server 并缓存其工具定义。"""
@@ -350,7 +390,10 @@ class AgentRuntime:
 
     def close(self) -> None:
         """关闭所有会话与 MCP Server。"""
+        sessions = list(self._sessions.values())
         self._sessions.clear()
+        for session in sessions:
+            session.close()
         clients = list(self._mcp_clients.values())
         self._mcp_clients.clear()
         self._mcp_tools.clear()

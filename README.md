@@ -78,6 +78,14 @@ tests/                  # pytest 测试
 uv sync
 ```
 
+格式化全部 Python 代码：
+
+```bash
+uv run aurora ruff
+uv run aurora ruff --check
+uv run aurora ruff src tests
+```
+
 真实 API 密钥只能保存在被 Git 忽略的 `.env` 或系统钥匙串中，绝不要提交到仓库。
 
 ### 运行最小 demo（mock 模式，无需密钥）
@@ -118,7 +126,7 @@ uv run aurora serve --sandbox-dir /path/to/project
 uv run aurora runtime
 ```
 
-运行时通过 stdin/stdout 交换逐行 JSON，不监听本地端口。前端先调用 `workspace.validate` 校验系统目录选择器返回的路径，再通过 `session.create` 创建绑定到该工作区的独立 Agent 会话。
+运行时通过 stdin/stdout 交换逐行 JSON，不监听本地端口。前端先调用 `workspace.validate` 校验系统目录选择器返回的路径；非 Git 工作区会通过 `workspace.git.initialize` 自动初始化，再通过 `session.create` 创建绑定到该工作区的独立 Agent 会话。
 
 浏览器开发模式可启用 WebSocket 传输：
 
@@ -132,7 +140,12 @@ WebSocket 地址为 `ws://127.0.0.1:8765/ws`。同级 `AuroraAgentFrontend` 项�
 {"id":"1","method":"workspace.validate","params":{"path":"/path/to/project"}}
 {"id":"2","method":"session.create","params":{"workspacePath":"/path/to/project","sandboxMode":"workspace-write","approvalMode":"interactive"}}
 {"id":"3","method":"run.start","params":{"sessionId":"<session-id>","goal":"查看 Git 提交记录"}}
+{"id":"4","method":"git.status","params":{"sessionId":"<session-id>","view":"workspace"}}
+{"id":"5","method":"git.diff","params":{"sessionId":"<session-id>","view":"run","runId":"<run-id>","path":"src/app.py"}}
+{"id":"6","method":"git.rollback","params":{"sessionId":"<session-id>","runId":"<run-id>"}}
 ```
+
+每轮 Agent 运行前后都会生成会话级临时 Git 快照。桌面端可以分别查看本轮变更和工作区相对 HEAD 的变更，并在工作区未继续变化时回滚最近一轮；运行前已有的未提交内容会被保留。快照不会创建提交、分支或 stash，随会话关闭清理。
 
 交互审批、目标澄清和结果评价分别通过 `approval.required`、`clarification.required` 和 `evaluation.required` 事件通知前端。前端使用事件中的 `sessionId`、`runId` 和 `interruptId` 调用 `run.resume`，完成后运行时广播 `run.completed`。
 
