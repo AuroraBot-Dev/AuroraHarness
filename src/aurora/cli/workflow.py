@@ -17,6 +17,16 @@ def respond_to_interrupt(console: Console, request: Mapping[str, Any]) -> Any:
         console.print(f"参数: {request.get('args', {})}")
         answer = console.input("允许执行？(y/n) ").strip().lower()
         return {"approved": answer in {"y", "yes"}}
+    if request.get("kind") == "decision":
+        console.print(str(request.get("question", "请选择下一步")))
+        return {"action": console.input("accept / cancel / retry > ").strip()}
+    if request.get("previewRequired"):
+        return {
+            "url": console.input("预览地址 > ").strip(),
+            "command": console.input("启动命令（留空使用已有服务）> ").strip(),
+            "cwd": console.input("工作区内目录（默认 .）> ").strip() or ".",
+            "pages": [console.input("页面路径（默认 /）> ").strip() or "/"],
+        }
     if request.get("kind") == "evaluation":
         score = console.input("[bold yellow]请评分（1-5）>[/bold yellow] ").strip()
         comment = console.input("[bold yellow]补充评价（可留空）>[/bold yellow] ").strip()

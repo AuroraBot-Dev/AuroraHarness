@@ -29,6 +29,27 @@ _ENV_LEVEL = "AURORA_LOG_LEVEL"
 # 常见吵闹的第三方库，统一压到 WARNING，避免刷屏
 _NOISY_LOGGERS = ("httpx", "httpcore", "urllib3", "asyncio", "aiosqlite")
 
+_secrets: set[str] = set()
+
+
+def register_secret(secret: str) -> None:
+    """注册不得输出到日志的运行时凭据。"""
+    if secret:
+        _secrets.add(secret)
+
+
+class SecretFilter(logging.Filter):
+    """在日志格式化前替换已知凭据。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        value = record.getMessage()
+        for secret in tuple(_secrets):
+            value = value.replace(secret, "[凭据已隐藏]")
+        record.msg = value
+        record.args = ()
+        return True
+
+
 _configured = False
 _console = Console(stderr=True)
 
@@ -55,6 +76,7 @@ def setup_logging(level: int | str | None = None) -> None:
         show_path=False,
     )
 
+    handler.addFilter(SecretFilter())
     root = logging.getLogger()
     root.setLevel(_resolve_level(level))
     root.addHandler(handler)

@@ -8,6 +8,7 @@ import json
 import socket
 from contextlib import suppress
 
+import pytest
 from websockets.asyncio.client import connect
 
 from aurora.agent.core import Effort, NoClarifier
@@ -39,14 +40,28 @@ def task(tool, args):
     }
 
 
+_runtimes = []
+
+
+@pytest.fixture(autouse=True)
+def close_runtimes():
+    """释放各测试创建的数据库和运行时资源。"""
+    yield
+    for runtime in _runtimes:
+        runtime.close()
+    _runtimes.clear()
+
+
 def make_runtime(planned_task):
     """创建不访问网络且不启用系统沙箱的测试运行时。"""
-    return AgentRuntime(
+    runtime = AgentRuntime(
         llm_factory=lambda: object(),
         sandbox_factory=lambda root, mode: Sandbox(root, executor=UnsafeSubprocessExecutor()),
         planner_factory=lambda llm, tools: StaticPlanner(planned_task),
         clarifier_factory=lambda llm: NoClarifier(),
     )
+    _runtimes.append(runtime)
+    return runtime
 
 
 def test_validate_workspace_reports_git_repository(tmp_path):

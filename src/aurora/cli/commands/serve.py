@@ -30,6 +30,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="本机文件权限模式",
     )
     parser.add_argument("--feedback-file", default=None, help="将用户评分和轨迹追加到 JSONL 文件")
+    parser.add_argument("--session-id", default=None, help="继续已有会话")
     parser.set_defaults(handler=_run)
 
 
@@ -38,11 +39,15 @@ def _run(args: argparse.Namespace) -> int:
     console = Console()
     feedback_sink = JsonlFeedbackStore(args.feedback_file) if args.feedback_file else None
     runtime = AgentRuntime()
-    agent_session = runtime.create_session(
-        args.sandbox_dir,
-        sandbox_mode=args.mode,
-        approval_mode=args.approve,
-        feedback_sink=feedback_sink,
+    agent_session = (
+        runtime.get_session(args.session_id)
+        if args.session_id
+        else runtime.create_session(
+            args.sandbox_dir,
+            sandbox_mode=args.mode,
+            approval_mode=args.approve,
+            feedback_sink=feedback_sink,
+        )
     )
     session = ConversationSession(
         agent_session.llm,
@@ -51,9 +56,11 @@ def _run(args: argparse.Namespace) -> int:
             goal,
             lambda request: respond_to_interrupt(console, request),
         ),
+        persistent_session=agent_session,
     )
 
     console.print("[bold cyan]Aurora 服务已启动[/bold cyan]")
+    console.print(f"会话 ID: {agent_session.id}")
     console.print(f"工作区: {agent_session.workspace.path}")
     console.print(f"沙箱模式: {args.mode} · 确认门: {args.approve}")
     console.print("输入 [bold]/help[/bold] 查看指令，输入 [bold]/exit[/bold] 退出。")
@@ -64,6 +71,7 @@ def _run(args: argparse.Namespace) -> int:
             line = console.input("[bold green]you>[/bold green] ")
         except (EOFError, KeyboardInterrupt):
             console.print("\nAurora 服务已停止。")
+            runtime.close()
             return 0
         try:
             reply = session.handle(line)
@@ -72,6 +80,7 @@ def _run(args: argparse.Namespace) -> int:
             continue
         if reply.exit_requested:
             console.print("Aurora 服务已停止。")
+            runtime.close()
             return 0
         _render_reply(console, reply)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
+from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field, field_validator
 
@@ -105,6 +106,13 @@ class LLMPlanner:
             ]
         )
         self._tool_desc = tool_desc
+        self.usage = {}
+
+    def set_instructions(self, instructions: str) -> None:
+        """将角色职责加入规划器系统消息。"""
+        self._prompt = ChatPromptTemplate.from_messages(
+            [("system", PLANNER_SYSTEM), SystemMessage(content=instructions), ("human", "{goal}")]
+        )
 
     def plan(self, goal: str) -> list[Task]:
         goal = sanitize_text(goal)
@@ -124,6 +132,9 @@ class LLMPlanner:
 
         # token 用量反馈
         usage = getattr(raw, "usage_metadata", None) or {}
+        for key, value in usage.items():
+            if isinstance(value, int):
+                self.usage[key] = self.usage.get(key, 0) + value
         if usage:
             log.info(
                 "token 用量：输入 %s / 输出 %s / 总计 %s",

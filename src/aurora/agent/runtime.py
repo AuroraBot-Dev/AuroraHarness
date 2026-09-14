@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from aurora.text import sanitize_text, sanitize_value
 
-from .core import LLMClarifier, LLMPlanner, build_delegation_graph
+from .core import LLMClarifier, LLMPlanner
 from .core.state import DelegationState
 from .mcp import (
     McpPackage,
@@ -24,10 +24,12 @@ from .mcp import (
     build_mcp_tools,
 )
 from .model_access import build_llm
-from .safety import build_gate
 from .sandbox import Sandbox, SandboxMode, create_sandbox
-from .store import GitRepository, GitView, build_git_tools
-from .tools import Tool, build_sandbox_tools, get_available_tools
+from .store import GitRepository, GitView
+from .tools import Tool
+
+if TYPE_CHECKING:
+    from .workflows import WorkflowSession
 
 
 @dataclass(frozen=True)
@@ -262,12 +264,33 @@ class AgentRuntime:
         planner_factory: Callable[[Any, Mapping[str, Tool]], Any] = LLMPlanner,
         clarifier_factory: Callable[[Any], Any] = LLMClarifier,
         mcp_packages: McpPackageRegistry | None = None,
+        database=None,
+        configured_llm_factory=None,
+        capture=None,
     ) -> None:
+        from .preview import BrowserCapture
+        from .store.database import Database
+        from .store.records import Records
+
+        self._custom_llm = llm_factory is not build_llm
+        self._configured_llm_factory = configured_llm_factory
+        self.records = Records(database or Database(":memory:" if self._custom_llm else None))
+        try:
+            self.records.acquire_runtime()
+            self.records.bootstrap()
+            self.records.recover()
+        except BaseException:
+            self.records.close()
+            raise
+        self.capture = capture or BrowserCapture()
+        self._workspace_locks = {}
+        self._workspace_lock_guard = threading.Lock()
         self._llm_factory = llm_factory
         self._sandbox_factory = sandbox_factory
         self._planner_factory = planner_factory
         self._clarifier_factory = clarifier_factory
-        self._sessions: dict[str, AgentSession] = {}
+        self._sessions: dict[str, WorkflowSession] = {}
+        self._session_lock = threading.RLock()
         self._mcp_packages = mcp_packages if mcp_packages is not None else McpPackageRegistry()
         self._mcp_clients: dict[str, StdioMcpClient] = {}
         self._mcp_tools: dict[str, dict[str, Tool]] = {}
@@ -280,46 +303,79 @@ class AgentRuntime:
         sandbox_mode: SandboxMode = "workspace-write",
         approval_mode: str = "interactive",
         feedback_sink: Callable[[DelegationState], None] | None = None,
-    ) -> AgentSession:
+        workflow_id: str | None = None,
+        title: str = "新对话",
+    ) -> WorkflowSession:
         """为指定工作区创建独立 Agent 会话。"""
-        repository = GitRepository.ensure(workspace_path)
-        workspace = validate_workspace(workspace_path)
-        sandbox = self._sandbox_factory(root=workspace.path, mode=sandbox_mode)
-        tools = get_available_tools()
-        tools.update(build_sandbox_tools(sandbox))
-        tools.update(build_git_tools(repository))
-        for server_tools in self._mcp_tools.values():
-            tools.update(server_tools)
-        llm = self._llm_factory()
-        planner = self._planner_factory(llm, tools)
-        gate_mode = "interrupt" if approval_mode == "interactive" else approval_mode
-        graph = build_delegation_graph(
-            planner,
-            tools,
-            build_gate(gate_mode),
-            clarifier=self._clarifier_factory(llm),
-            checkpointer=InMemorySaver(),
-            collect_feedback=feedback_sink is not None,
-            feedback_sink=feedback_sink,
+        from .store.database import now, uid
+
+        if approval_mode not in {"interactive", "always", "never"}:
+            raise ValueError("未知审批策略")
+        if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
+            raise ValueError("未知沙箱模式")
+        self.records.snapshot(
+            workflow_id or self.records.setting("default_workflow_id"), sandbox_mode, approval_mode
         )
-        session_id = uuid4().hex
-        session = AgentSession(session_id, workspace, sandbox, graph, llm, planner, repository)
-        self._sessions[session_id] = session
+        workspace = validate_workspace(workspace_path)
+        project = self.records.project(workspace.path)
+        record = self.records.insert(
+            "sessions",
+            id=uid(),
+            project_id=project["id"],
+            workflow_id=workflow_id or self.records.setting("default_workflow_id"),
+            title=title,
+            sandbox_mode=sandbox_mode,
+            approval_mode=approval_mode,
+            created_at=now(),
+            updated_at=now(),
+        )
+        session = self.get_session(record["id"])
+        session.feedback_sink = feedback_sink
         return session
 
-    def get_session(self, session_id: str) -> AgentSession:
-        """返回已创建的会话。"""
-        try:
+    def get_session(self, session_id: str) -> WorkflowSession:
+        """按需重建持久会话的本地资源。"""
+        with self._session_lock:
+            if session_id not in self._sessions:
+                from .workflows import WorkflowSession
+
+                record = self.records.get("sessions", session_id)
+                project = self.records.get("projects", record["project_id"])
+                workspace = validate_workspace(project["path"])
+                repository = GitRepository.ensure(workspace.path)
+                self._sessions[session_id] = WorkflowSession(self, record, workspace, repository)
             return self._sessions[session_id]
-        except KeyError as exc:
-            raise ValueError(f"会话不存在: {session_id}") from exc
 
     def close_session(self, session_id: str) -> None:
-        """关闭并移除会话。"""
-        session = self._sessions.pop(session_id, None)
-        if session is None:
-            raise ValueError(f"会话不存在: {session_id}")
-        session.close()
+        """释放会话资源并保留历史。"""
+        with self._session_lock:
+            self.records.get("sessions", session_id)
+            session = self._sessions.get(session_id)
+            if session:
+                session.close()
+                self._sessions.pop(session_id, None)
+
+    def workspace_lock(self, path):
+        """同一工作区的阶段执行使用共享锁。"""
+        with self._workspace_lock_guard:
+            return self._workspace_locks.setdefault(path, threading.Lock())
+
+    def redact(self, value):
+        """从持久化错误和工具日志中移除配置凭据。"""
+        for provider in self.records.list_configs("provider"):
+            ref = provider["credential_ref"]
+            if ref.startswith("env:"):
+                secret = os.getenv(ref[4:])
+            else:
+                import keyring
+
+                try:
+                    secret = keyring.get_password("Aurora", ref[8:])
+                except Exception:
+                    secret = None
+            if secret:
+                value = value.replace(secret, "[凭据已隐藏]")
+        return value
 
     def connect_mcp_server(self, config: McpServerConfig) -> dict[str, Any]:
         """连接 MCP Server 并缓存其工具定义。"""
@@ -400,6 +456,7 @@ class AgentRuntime:
         self._mcp_package_ids.clear()
         for client in clients:
             client.close()
+        self.records.close()
 
     def _mcp_status(self, name: str) -> dict[str, Any]:
         """构造带工具摘要的 MCP Server 状态。"""

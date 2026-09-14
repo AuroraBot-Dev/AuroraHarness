@@ -9,11 +9,13 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 MAX_OUTPUT_BYTES = 64 * 1024
+CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar("preview_cancel", default=None)
 SandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
 
 
@@ -160,7 +162,20 @@ def run_process(
         thread.start()
     timed_out = False
     try:
-        process.wait(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            cancelled = CANCEL_EVENT.get()
+            if cancelled is not None and cancelled.is_set():
+                _kill_process_tree(process)
+                process.wait()
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            try:
+                process.wait(timeout=min(remaining, 0.1))
+            except subprocess.TimeoutExpired:
+                continue
     except subprocess.TimeoutExpired:
         timed_out = True
         _kill_process_tree(process)

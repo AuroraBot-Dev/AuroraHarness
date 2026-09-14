@@ -1,9 +1,9 @@
 # 存储层（Store）
 
-负责保存和恢复 Agent 运行状态，包括数据库实体以及会话级工作区版本快照。
+`database.py` 管理 SQLite 连接、外键、WAL 和版本化事务迁移。
+`records.py` 管理项目、会话、角色与模型配置、执行记录、交接消息、审查证据及产物文件。
+`ownership.py` 保证同一数据库只由一个运行时接管，避免重启恢复误伤活动任务。
 
-持久化实体：projects / sessions / messages / runs / tasks / attachments / approvals / 非敏感 settings / legacy import 记录。
+`migrations/` 中的 SQL 是结构来源；字段与协议说明见仓库 `docs/database.md`。
 
-启用 foreign keys、WAL 和版本化迁移；状态变更在事务内提交后才发事件（见 ADR-006、桌面应用架构）。
-
-`git.py` 管理绑定工作区的 Git 状态、临时对象、运行前后快照和安全回滚。快照仅存在于会话生命周期内，不向项目仓库写入提交、分支或 stash。
+`git.py` 管理会话工作区快照及回滚，快照生命周期仍限于当前运行时资源，不写入项目提交、分支或 stash。

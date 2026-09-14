@@ -1,0 +1,68 @@
+"""浏览器截图与预览进程生命周期测试。"""
+
+from __future__ import annotations
+
+import shlex
+import socket
+import sys
+import threading
+import time
+
+import pytest
+
+from aurora.agent.preview import BrowserCapture, validate_preview
+from aurora.agent.sandbox import Sandbox, UnsafeSubprocessExecutor
+
+
+def test_preview_rejects_external_urls_and_path_escape(tmp_path):
+    sandbox = Sandbox(tmp_path, executor=UnsafeSubprocessExecutor())
+    for config in (
+        {"url": "https://example.com"},
+        {"url": "http://localhost:3000", "cwd": ".."},
+        {"url": "http://localhost:3000", "pages": ["//example.com"]},
+        {"url": "http://localhost:3000", "viewports": []},
+    ):
+        with pytest.raises(ValueError):
+            validate_preview(config, sandbox)
+
+
+def test_preview_command_cancellation_stops_before_timeout(tmp_path):
+    sandbox = Sandbox(tmp_path, executor=UnsafeSubprocessExecutor())
+    cancelled = threading.Event()
+    timer = threading.Timer(0.2, cancelled.set)
+    started = time.monotonic()
+    timer.start()
+    try:
+        result = sandbox.run_in(
+            ".", f'{shlex.quote(sys.executable)} -c "import time; time.sleep(30)"', 30, cancelled
+        )
+        assert time.monotonic() - started < 5
+        assert result.exit_code != 0
+    finally:
+        timer.cancel()
+
+
+def test_real_browser_capture_and_preview_cleanup(tmp_path):
+    from playwright.sync_api import Error as PlaywrightError
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    (tmp_path / "index.html").write_text("<!doctype html><h1>Aurora preview</h1>", encoding="utf-8")
+    config = {
+        "url": f"http://127.0.0.1:{port}",
+        "command": f"{shlex.quote(sys.executable)} -m http.server {port} --bind 127.0.0.1",
+    }
+    try:
+        screenshots, log = BrowserCapture().capture(
+            config, Sandbox(tmp_path, executor=UnsafeSubprocessExecutor())
+        )
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc):
+            pytest.skip("运行 uv run playwright install chromium 后可测试真实浏览器")
+        raise
+    assert len(screenshots) == 2
+    assert all(data.startswith(b"\x89PNG") for data, _ in screenshots)
+    assert [metadata["viewport"]["width"] for _, metadata in screenshots] == [1440, 390]
+    with socket.socket() as probe:
+        assert probe.connect_ex(("127.0.0.1", port)) != 0

@@ -47,7 +47,9 @@ class ConversationSession:
         llm,
         planner: Planner,
         run_goal: Callable[[str], Mapping],
+        persistent_session=None,
     ) -> None:
+        self._persistent_session = persistent_session
         self._llm = llm
         self._planner = planner
         self._run_goal = run_goal
@@ -56,6 +58,13 @@ class ConversationSession:
     @property
     def history_size(self) -> int:
         """返回已保存的对话消息数。"""
+        if self._persistent_session:
+            record = self._persistent_session.records.get("sessions", self._persistent_session.id)
+            return self._persistent_session.records.db.one(
+                "SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND seq>? "
+                "AND visibility='public'",
+                (record["id"], record["context_start_seq"]),
+            )["n"]
         return len(self._history)
 
     def handle(self, line: str) -> SessionReply:
@@ -84,6 +93,9 @@ class ConversationSession:
         """调用模型回答并保存多轮上下文。"""
         if not message:
             return SessionReply(text="用法：/say <内容>")
+        if self._persistent_session:
+            result = self._persistent_session.start(message, mode="say")
+            return SessionReply(text=str(result.state.get("report", "")))
         human = HumanMessage(content=message)
         response = self._llm.invoke([SystemMessage(content=SYSTEM_PROMPT), *self._history, human])
         ai = response if isinstance(response, BaseMessage) else AIMessage(content=str(response))
@@ -94,6 +106,10 @@ class ConversationSession:
         """生成目标计划但不执行工具。"""
         if not goal:
             return SessionReply(text="用法：/plan <目标>")
+        if self._persistent_session:
+            update = self._persistent_session.start(goal, mode="plan")
+            tasks = update.state.get("tasks", [])
+            return SessionReply(text=f"已生成 {len(tasks)} 个任务。", tasks=tasks)
         return SessionReply(
             text=f"已生成 {len(tasks := self._planner.plan(goal))} 个任务。", tasks=tasks
         )
@@ -111,6 +127,8 @@ class ConversationSession:
 
     def _clear(self, _: str) -> SessionReply:
         """清空直接对话上下文。"""
+        if self._persistent_session:
+            self._persistent_session.records.clear_context(self._persistent_session.id)
         self._history.clear()
         return SessionReply(text="对话上下文已清空。")
 

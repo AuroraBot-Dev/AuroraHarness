@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Mapping
-from typing import Any
 
 from websockets.asyncio.server import ServerConnection, serve
 
@@ -50,14 +50,26 @@ async def serve_websocket(api: RuntimeApi, host: str = "127.0.0.1", port: int = 
                     continue
 
                 if "request_id" in request or "protocol_version" in request:
-                    frames: list[dict[str, Any]] = []
-                    api.process_wire(request, frames.append)
-                    for frame in frames:
-                        await websocket.send(
-                            json.dumps(
-                                sanitize_value(frame), ensure_ascii=False, separators=(",", ":")
+                    queue = asyncio.Queue()
+                    loop = asyncio.get_running_loop()
+
+                    def emit(frame):
+                        loop.call_soon_threadsafe(queue.put_nowait, frame)
+
+                    def process():
+                        try:
+                            api.process_wire(request, emit)
+                        finally:
+                            emit(None)
+
+                    worker = asyncio.create_task(asyncio.to_thread(process))
+                    try:
+                        while (frame := await queue.get()) is not None:
+                            await websocket.send(
+                                json.dumps(sanitize_value(frame), ensure_ascii=False)
                             )
-                        )
+                    finally:
+                        await worker
                 else:
                     frames = api.handle(request)
                     for frame in frames:

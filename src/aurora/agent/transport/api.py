@@ -26,6 +26,9 @@ class RuntimeApi:
 
     def __init__(self, runtime: AgentRuntime | None = None) -> None:
         self._runtime = runtime or AgentRuntime()
+        from .persistence import PersistenceApi
+
+        self._persistence = PersistenceApi(self._runtime)
 
     def handle(self, request: Mapping[str, Any]) -> list[dict[str, Any]]:
         """处理单个请求并返回响应与后续事件。"""
@@ -39,13 +42,13 @@ class RuntimeApi:
             result, events = self._dispatch(method, params)
             return [{"id": request_id, "result": result}, *events]
         except MethodNotFoundError as exc:
-            return [_error(request_id, "method_not_found", str(exc))]
+            return [_error(request_id, "method_not_found", self._runtime.redact(str(exc)))]
         except McpClientError as exc:
-            return [_error(request_id, "mcp_error", str(exc))]
-        except (TypeError, ValueError) as exc:
-            return [_error(request_id, "invalid_request", str(exc))]
+            return [_error(request_id, "mcp_error", self._runtime.redact(str(exc)))]
+        except (TypeError, ValueError, KeyError) as exc:
+            return [_error(request_id, "invalid_request", self._runtime.redact(str(exc)))]
         except Exception as exc:
-            return [_error(request_id, "internal_error", str(exc))]
+            return [_error(request_id, "internal_error", self._runtime.redact(str(exc)))]
 
     def handle_wire(self, request: Mapping[str, Any]) -> list[dict[str, Any]]:
         """处理桌面端协议信封并返回响应与事件。"""
@@ -114,13 +117,13 @@ class RuntimeApi:
             for event in events:
                 emit(_wire_event(str(event["event"]), event.get("data", {})))
         except MethodNotFoundError as exc:
-            emit(_wire_error(request_id, "method_not_found", str(exc)))
+            emit(_wire_error(request_id, "method_not_found", self._runtime.redact(str(exc))))
         except McpClientError as exc:
-            emit(_wire_error(request_id, "mcp_error", str(exc)))
-        except (TypeError, ValueError) as exc:
-            emit(_wire_error(request_id, "invalid_request", str(exc)))
+            emit(_wire_error(request_id, "mcp_error", self._runtime.redact(str(exc))))
+        except (TypeError, ValueError, KeyError) as exc:
+            emit(_wire_error(request_id, "invalid_request", self._runtime.redact(str(exc))))
         except Exception as exc:
-            emit(_wire_error(request_id, "internal_error", str(exc)))
+            emit(_wire_error(request_id, "internal_error", self._runtime.redact(str(exc))))
 
     def _dispatch_stream(
         self,
@@ -145,6 +148,9 @@ class RuntimeApi:
                         started.add(task_id)
                         emit(_wire_event("task.started", {**base, "taskId": task_id, "task": task}))
 
+            if node.startswith(("stage.", "artifact.", "review.")):
+                emit(_wire_event(node, {**base, **dict(update)}))
+                return
             if node in {"run.started", "run.resumed"}:
                 emit(_wire_event(node, {**base, **dict(update)}))
                 return
@@ -199,7 +205,13 @@ class RuntimeApi:
                 )
 
         if method == "run.start":
-            update = session.start(_required_string(params, "goal"), progress)
+            update = session.start(
+                _required_string(params, "goal"),
+                progress,
+                workflow_id=_optional_string(params, "workflowId"),
+                request_key=_optional_string(params, "requestKey"),
+                mode=str(params.get("mode", "run")),
+            )
         else:
             update = session.resume(
                 _required_string(params, "runId"),
@@ -215,10 +227,15 @@ class RuntimeApi:
         params: Mapping[str, Any],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """执行一个协议方法。"""
+        if method in self._persistence.capabilities:
+            return self._persistence.dispatch(method, params), []
         if method == "runtime.initialize":
             return {
                 "protocolVersion": str(PROTOCOL_VERSION),
+                "databasePath": self._runtime.records.db.path,
+                "defaultWorkflowId": self._runtime.records.setting("default_workflow_id"),
                 "capabilities": [
+                    *self._persistence.capabilities,
                     "workspace.validate",
                     "workspace.git.initialize",
                     "session.create",
@@ -280,16 +297,27 @@ class RuntimeApi:
                 _required_string(params, "workspacePath"),
                 sandbox_mode=sandbox_mode,
                 approval_mode=str(params.get("approvalMode", "interactive")),
+                workflow_id=_optional_string(params, "workflowId"),
+                title=str(params.get("title", "新对话")),
             )
             return {
                 "sessionId": session.id,
+                "projectId": session.record["project_id"],
+                "workflowId": session.record["workflow_id"],
                 "workspace": session.workspace.to_dict(),
                 "sandboxMode": sandbox_mode,
                 "approvalMode": str(params.get("approvalMode", "interactive")),
             }, []
         if method == "run.start":
             session = self._runtime.get_session(_required_string(params, "sessionId"))
-            return _frames_for_update(session.start(_required_string(params, "goal")))
+            return _frames_for_update(
+                session.start(
+                    _required_string(params, "goal"),
+                    workflow_id=_optional_string(params, "workflowId"),
+                    request_key=_optional_string(params, "requestKey"),
+                    mode=str(params.get("mode", "run")),
+                )
+            )
         if method == "run.resume":
             session = self._runtime.get_session(_required_string(params, "sessionId"))
             update = session.resume(
@@ -352,11 +380,14 @@ def _frames_for_update(update: RunUpdate) -> tuple[dict[str, Any], list[dict[str
     result = update.to_dict()
     if update.status == "completed":
         return result, [{"event": "run.completed", "data": result}]
+    if update.status in {"failed", "interrupted", "cancelled"}:
+        return result, [{"event": "run." + update.status, "data": result}]
     events: list[dict[str, Any]] = []
     names = {
         "approval": "approval.required",
         "clarification": "clarification.required",
         "evaluation": "evaluation.required",
+        "decision": "run.input_required",
     }
     for pending in update.interruptions:
         data = {

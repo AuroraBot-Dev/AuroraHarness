@@ -238,3 +238,7 @@ uv run pip-audit
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。
+
+## 数据库与多 Agent 协作
+
+本地历史、模型与 Agent 配置、预设协作流程和视觉审查记录由 SQLite 管理。配置步骤、数据结构、接口及重启行为见 [数据库与协作说明](docs/database.md)。视觉审查首次使用前运行 `uv run playwright install chromium`。

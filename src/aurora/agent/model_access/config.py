@@ -8,6 +8,8 @@ from dotenv import find_dotenv, load_dotenv
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from aurora.logging import register_secret
+
 # 向上搜索并加载项目根目录的 .env，不依赖 uv run 是否自动加载
 load_dotenv(find_dotenv())
 
@@ -34,4 +36,30 @@ def build_llm():
         )
 
     assert api_key is not None and model is not None
+    register_secret(api_key)
     return ChatOpenAI(api_key=SecretStr(api_key), model=model, base_url=base_url, temperature=0)
+
+
+def build_configured_llm(config):
+    """使用冻结配置与外部凭据构建独立模型客户端。"""
+    provider, model = config["provider"], config["model"]
+    ref = provider["credential_ref"]
+    if ref.startswith("env:"):
+        secret = os.getenv(ref[4:])
+    elif ref.startswith("keyring:"):
+        import keyring
+
+        secret = keyring.get_password("Aurora", ref[8:])
+    else:
+        raise ValueError("不支持的凭据引用")
+    if not secret:
+        raise ValueError("供应商凭据未配置")
+    if model["model_name"] == "unconfigured":
+        raise ValueError("请先配置模型名称")
+    register_secret(secret)
+    return ChatOpenAI(
+        api_key=SecretStr(secret),
+        model=model["model_name"],
+        base_url=provider["base_url"],
+        **({"temperature": 0} | model["parameters"]),
+    )

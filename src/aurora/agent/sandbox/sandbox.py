@@ -99,6 +99,18 @@ class Sandbox:
             timeout=timeout or self._default_timeout,
         )
 
+    def run_in(self, path: str, command: str, timeout: float = 45, cancel=None) -> ExecutionResult:
+        """在沙箱内的指定工作目录执行预览命令。"""
+        from .executor import CANCEL_EVENT
+
+        token = CANCEL_EVENT.set(cancel)
+        try:
+            return self._executor.run(
+                self._executor.command_argv(command), cwd=self.resolve(path), timeout=timeout
+            )
+        finally:
+            CANCEL_EVENT.reset(token)
+
     def run_python(self, code: str, timeout: float | None = None) -> ExecutionResult:
         """通过标准输入运行 Python 代码且不创建临时脚本。"""
         return self._executor.run(
