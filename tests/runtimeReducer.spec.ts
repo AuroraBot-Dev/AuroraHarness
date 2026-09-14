@@ -32,3 +32,15 @@ describe('runtime event isolation', () => {
     expect(message?.status).toBe('completed')
   })
 })
+
+describe('workflow decisions', () => {
+  it('preserves explicit review-limit actions and preview forms', () => {
+    setActivePinia(createPinia())
+    const runtime = useRuntimeStore()
+    runtime.addInterruption('s', 'r', { interruptId: 'decision', kind: 'decision', actions: ['accept', 'cancel', 'retry'] })
+    runtime.addInterruption('s', 'r', { interruptId: 'preview', kind: 'clarification', previewRequired: true })
+    expect(runtime.approvals[0]?.kind).toBe('decision')
+    expect(runtime.approvals[0]?.actions).toEqual(['accept', 'cancel', 'retry'])
+    expect(runtime.approvals[1]?.previewRequired).toBe(true)
+  })
+})

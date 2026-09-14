@@ -1,10 +1,27 @@
 <script setup lang="ts">
-import { NBadge, NButton, NIcon, NSpin } from 'naive-ui'
+import { NBadge, NButton, NIcon, NSpin, NSelect, useMessage } from 'naive-ui'
 import { AlertTriangle, Book, Check, Clock, Edit, File, FileDiff, Folder, Loader, Terminal2 } from '@vicons/tabler'
 import type { SessionRecord, TaskNode } from '~/types/agent'
+import type { WorkflowConfig } from '~/types/workflow'
+import { runtimeRequest } from '~/utils/runtimeClient'
 
 const props = defineProps<{ session: SessionRecord }>()
 const runtime = useRuntimeStore()
+const sessions = useSessionStore()
+const notice = useMessage()
+const workflows = ref<WorkflowConfig[]>([])
+onMounted(async () => {
+  try { workflows.value = (await runtimeRequest<{ items: WorkflowConfig[] }>('workflow.list')).items }
+  catch (error) { notice.error(String(error)) }
+})
+async function changeWorkflow(workflowId: string) {
+  try { await runtimeRequest('session.update', { sessionId: props.session.id, workflowId }); await sessions.load(props.session.id) }
+  catch (error) { notice.error(String(error)) }
+}
+async function clearContext() {
+  try { await runtimeRequest('session.clear', { sessionId: props.session.id }); notice.success('已清空模型上下文，历史记录仍保留') }
+  catch (error) { notice.error(String(error)) }
+}
 const git = useGitStore()
 const scrollElement = ref<HTMLElement | null>(null)
 const showChanges = ref(false)
@@ -13,11 +30,11 @@ const orphanMessages = computed(() => props.session.messages.filter((message) =>
 const timeline = computed(() => props.session.runs.map((run) => ({
   run,
   user: props.session.messages.find((message) => message.runId === run.id && message.role === 'user'),
-  responses: props.session.messages.filter((message) => message.runId === run.id && message.role !== 'user'),
+  responses: props.session.messages.filter((message) => message.runId === run.id && message.role !== 'user' && message.visibility !== 'internal'),
   tasks: props.session.tasks.filter((task) => task.runId === run.id),
   requests: runtime.approvalsFor(props.session.id).filter((request) => request.runId === run.id),
 })))
-const statusText = computed(() => ({ idle: '就绪', queued: '排队中', running: '正在执行', waiting: '等待输入', completed: '已完成', failed: '执行失败', cancelled: '已取消' }[props.session.status]))
+const statusText = computed(() => ({ idle: '就绪', queued: '排队中', running: '正在执行', waiting: '等待输入', completed: '已完成', failed: '执行失败', cancelled: '已取消', interrupted: '已中断' }[props.session.status]))
 const workspaceStatus = computed(() => git.statusFor(props.session.id, 'workspace'))
 
 async function refreshGit() {
@@ -73,6 +90,8 @@ function activityLabel(task: TaskNode) {
     <header class="conversation-header">
       <div class="title-row"><span class="folder-icon"><NIcon :component="Folder" :size="17" /></span><h1>{{ session.title }}</h1></div>
       <div class="header-actions">
+        <NSelect :value="session.workflowId" :options="workflows.filter((item) => item.enabled).map((item) => ({ label: item.name, value: item.id }))" :disabled="!!activeRun" size="small" style="width:180px" placeholder="协作流程" @update:value="changeWorkflow" />
+        <NButton size="small" quaternary :disabled="!!activeRun" @click="clearContext">清空上下文</NButton>
         <NBadge :value="workspaceStatus?.files.length || 0" :show="!!workspaceStatus?.files.length" :max="99">
           <NButton quaternary size="small" @click="showChanges = true"><template #icon><NIcon :component="FileDiff" /></template>改动</NButton>
         </NBadge>
@@ -82,6 +101,7 @@ function activityLabel(task: TaskNode) {
 
     <main ref="scrollElement" class="conversation-scroll app-scrollbar">
       <div class="conversation-column">
+        <NButton v-if="session.nextBeforeSeq" size="small" @click="sessions.loadOlder(session.id)">加载更早消息</NButton>
         <template v-for="message in orphanMessages" :key="message.id">
           <div v-if="message.role === 'user'" class="user-block"><div class="user-message">{{ message.content }}</div></div>
           <article v-else class="assistant-message"><MarkdownContent :content="message.content" /></article>
@@ -106,6 +126,8 @@ function activityLabel(task: TaskNode) {
             </div>
           </div>
 
+          <RunReview :run-id="entry.run.id" :status="entry.run.status" />
+
           <ApprovalCard v-for="request in entry.requests" :key="request.id" :request="request" @decide="runtime.resolveApproval" @respond="runtime.resumeInput" />
 
           <template v-for="message in entry.responses" :key="message.id">
@@ -129,5 +151,5 @@ function activityLabel(task: TaskNode) {
 .conversation-scroll{overflow:auto;padding:36px 34px 190px}.conversation-column{width:min(980px,100%);margin:0 auto}.run-section{padding:0 0 31px;margin:0 0 31px;border-bottom:1px solid var(--border)}.run-section:last-of-type{border-bottom:0}.user-block{margin:0 0 30px auto;width:fit-content;max-width:78%}.user-message{padding:10px 15px;border-radius:17px;background:var(--surface-muted);font-size:14px;line-height:1.65}.message-files{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:5px;margin-top:6px}.message-files span{display:flex;align-items:center;gap:4px;color:var(--text-muted);font-size:10px}.message-files svg{width:13px}
 .activity-feed{display:grid;gap:15px;margin:4px 0 27px}.activity-row{display:flex;min-height:20px;align-items:center;gap:9px;color:var(--text-muted);font-size:13px;line-height:1.45}.activity-row :deep(svg){flex:0 0 auto}.activity-row strong{color:var(--text-muted);font-weight:600}.activity-row span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-row.failed,.activity-row.failed strong{color:#c33f3f}.activity-row.waiting,.activity-row.waiting strong{color:#b7791f}.activity-summary{margin-bottom:2px}.activity-summary span{font-weight:600}
 .assistant-message{position:relative;margin:0 0 25px}.assistant-message :deep(.markdown-content){font-size:15.5px;line-height:1.85}.assistant-message :deep(.markdown-content p){margin-bottom:17px}.cursor{display:inline-block;width:6px;height:15px;margin-left:2px;background:var(--text);animation:blink 1s steps(2) infinite}@keyframes blink{50%{opacity:0}}.error-message{display:flex;gap:9px;margin:10px 0 22px;padding:12px;border:1px solid rgb(209 67 67 / 30%);border-radius:9px;background:rgb(209 67 67 / 7%);color:#c33f3f;font-size:13px}.tool-message{margin:8px 0 20px;padding-left:26px;border-left:2px solid var(--border)}.tool-message :deep(.markdown-content){font-size:13px;color:var(--text-muted)}.working-row{display:flex;align-items:center;gap:9px;margin:18px 0;color:var(--text-muted);font-size:13px}
-@media(max-width:680px){.conversation-scroll{padding:26px 16px 176px}.conversation-column{width:100%}.user-block{max-width:92%}.activity-row span:last-child{white-space:normal}.assistant-message :deep(.markdown-content){font-size:14.5px}.run-section{margin-bottom:24px;padding-bottom:24px}}
+@media(max-width:680px){.conversation-view{grid-template-rows:auto minmax(0,1fr)}.conversation-header{flex-wrap:wrap;gap:8px;padding:10px 14px}.header-actions{flex-wrap:wrap}.title-row{width:100%}.conversation-scroll{padding:26px 16px 176px}.conversation-column{width:100%}.user-block{max-width:92%}.activity-row span:last-child{white-space:normal}.assistant-message :deep(.markdown-content){font-size:14.5px}.run-section{margin-bottom:24px;padding-bottom:24px}}
 </style>

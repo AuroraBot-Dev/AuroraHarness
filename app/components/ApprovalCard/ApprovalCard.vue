@@ -10,6 +10,10 @@ const emit = defineEmits<{
 }>();
 const answer = ref("");
 const score = ref(5);
+const preview = reactive({ url: 'http://127.0.0.1:3000', command: '', cwd: '.', page: '/' });
+function submitPreview() {
+  emit('respond', props.request.id, { url: preview.url, command: preview.command, cwd: preview.cwd, pages: [preview.page] });
+}
 
 function submitInput() {
   if (props.request.kind === "evaluation")
@@ -40,7 +44,17 @@ function submitInput() {
       </div>
       <p>{{ request.question || request.action }}</p>
       <p v-if="request.details">{{ request.details }}</p>
-      <div v-if="request.kind === 'clarification'" class="input-row">
+      <div v-if="request.kind === 'decision'" class="input-row">
+        <NButton v-for="action in request.actions || ['accept', 'cancel', 'retry']" :key="action" @click="emit('respond', request.id, { action })">{{ ({ accept: '接受当前结果', cancel: '取消', retry: '再试一次' } as Record<string, string>)[action] }}</NButton>
+      </div>
+      <div v-else-if="request.previewRequired" class="preview-form">
+        <label>预览地址<NInput v-model:value="preview.url" /></label>
+        <label>启动命令（留空使用已启动服务）<NInput v-model:value="preview.command" placeholder="npm run dev" /></label>
+        <label>工作区内目录<NInput v-model:value="preview.cwd" /></label>
+        <label>页面路径<NInput v-model:value="preview.page" /></label>
+        <NButton type="primary" @click="submitPreview">保存并继续</NButton>
+      </div>
+      <div v-else-if="request.kind === 'clarification'" class="input-row">
         <NInput
           v-model:value="answer"
           placeholder="输入补充信息"
@@ -77,6 +91,7 @@ function submitInput() {
 </template>
 
 <style scoped>
+.preview-form{display:grid;gap:10px;margin-top:10px}.preview-form label{display:grid;gap:4px;font-size:12px}
 .approval-card {
   display: flex;
   align-items: flex-start;

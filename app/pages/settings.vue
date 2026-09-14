@@ -44,7 +44,7 @@ async function connectServer() {
 
 async function restart() {
   restarting.value = true
-  try { await runtime.restart(); await runtime.loadMcp(); message.success('运行时已重启，内存会话已清空') }
+  try { await runtime.restart(); await runtime.loadMcp(); message.success('运行时已重启，历史已恢复') }
   catch (error) { message.error(String(error)) }
   finally { restarting.value = false }
 }
@@ -65,9 +65,11 @@ async function restart() {
           <NDescriptionsItem label="传输">{{ runtime.info.mode }}</NDescriptionsItem>
           <NDescriptionsItem label="接口数">{{ runtime.info.capabilities?.length || 0 }}</NDescriptionsItem>
         </NDescriptions>
-        <NAlert type="info" :show-icon="false" class="runtime-note">模型由后端根目录的 <code>.env</code> 配置：AGENT_API_KEY、AGENT_BASE_URL、AGENT_MODEL。</NAlert>
+        <NAlert type="info" :show-icon="false" class="runtime-note">历史与协作配置保存在本机数据库：{{ runtime.info.databasePath }}</NAlert>
         <NButton secondary :loading="restarting" @click="restart"><template #icon><NIcon :component="Refresh" /></template>重启运行时</NButton>
       </NCard>
+
+      <WorkflowSettings />
 
       <NCard title="MCP 功能包"><template #header-extra><NIcon :component="PlugConnected" :size="18" /></template>
         <NAlert v-if="Object.keys(runtime.pluginErrors).length" type="warning" :show-icon="false">{{ runtime.pluginErrors }}</NAlert>

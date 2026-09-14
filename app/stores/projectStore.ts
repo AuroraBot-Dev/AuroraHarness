@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import type { ProjectRecord } from '~/types/agent'
+import { normalizeProject } from '~/utils/normalizers'
 import { runtimeRequest } from '~/utils/runtimeClient'
 import { useSessionStore } from '~/stores/sessionStore'
 
@@ -25,7 +26,11 @@ export const useProjectStore = defineStore('projects', {
       this.loading = true
       try {
         const saved = JSON.parse(localStorage.getItem(storageKey) || '{}')
-        this.projects = Array.isArray(saved.projects) ? saved.projects : []
+        if (Array.isArray(saved.projects) && saved.projects.length) {
+          await runtimeRequest('project.import', { sourceKey: storageKey, projects: saved.projects })
+        }
+        const result = await runtimeRequest<{ items: Record<string, unknown>[] }>('project.list')
+        this.projects = result.items.map(normalizeProject)
         this.activeProjectId = typeof saved.activeProjectId === 'string' ? saved.activeProjectId : this.projects[0]?.id ?? null
         this.loaded = true
       } finally { this.loading = false }
@@ -45,12 +50,8 @@ export const useProjectStore = defineStore('projects', {
       if (!workspace.isGitRepository) workspace = await runtimeRequest<WorkspaceResult>('workspace.git.initialize', { path: workspace.path })
       const existing = this.projects.find((item) => item.path === workspace.path)
       if (existing) { this.activeProjectId = existing.id; this.persist(); return existing }
-      const now = new Date().toISOString()
-      const project: ProjectRecord = {
-        id: `workspace_${crypto.randomUUID()}`, name: String(workspace.name), path: String(workspace.path),
-        isGitRepository: Boolean(workspace.isGitRepository), writable: Boolean(workspace.writable),
-        createdAt: now, updatedAt: now,
-      }
+      const raw = await runtimeRequest<Record<string, unknown>>('project.create', { data: { name: workspace.name, path: workspace.path } })
+      const project = normalizeProject({ ...raw, ...workspace })
       this.projects.push(project)
       this.activeProjectId = project.id
       this.persist()
@@ -59,12 +60,14 @@ export const useProjectStore = defineStore('projects', {
     async rename(id: string, name: string) {
       const project = this.byId(id)
       if (!project) throw new Error('工作区不存在')
+      await runtimeRequest('project.update', { id, data: { name } })
       project.name = name; project.updatedAt = new Date().toISOString(); this.persist()
       return project
     },
     async delete(id: string) {
       const sessionStore = useSessionStore()
       await Promise.all(sessionStore.sessions.filter((item) => item.projectId === id).map((item) => sessionStore.delete(item.id)))
+      await runtimeRequest('project.delete', { id })
       this.projects = this.projects.filter((item) => item.id !== id)
       if (this.activeProjectId === id) this.activeProjectId = this.projects[0]?.id ?? null
       this.persist()

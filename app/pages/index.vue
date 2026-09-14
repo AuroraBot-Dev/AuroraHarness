@@ -51,7 +51,7 @@ async function addWorkspace() {
         placeholder="例如：梳理项目架构，并给出下一阶段实施建议"
         @submit="submit"
       />
-      <p class="privacy-note">当前后端会话保存在内存中；重启运行时后需要新建会话</p>
+      <p class="privacy-note">对话与协作记录保存在本机；重启后可以查看历史并继续新一轮任务</p>
     </div>
   </main>
 </template>

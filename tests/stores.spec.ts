@@ -23,7 +23,7 @@ describe('application stores', () => {
 
   it('creates and reuses validated workspaces', async () => {
     vi.mocked(runtimeRequest).mockResolvedValue({
-      name: 'workspace', path: '/tmp/workspace', isGitRepository: true, writable: true,
+      id: 'p1', name: 'workspace', path: '/tmp/workspace', isGitRepository: true, writable: true,
     })
     const projects = useProjectStore()
     const first = await projects.create('/tmp/workspace')
@@ -37,6 +37,7 @@ describe('application stores', () => {
     vi.mocked(runtimeRequest)
       .mockResolvedValueOnce({ name: 'workspace', path: '/tmp/workspace', isGitRepository: false, writable: true })
       .mockResolvedValueOnce({ name: 'workspace', path: '/tmp/workspace', isGitRepository: true, writable: true })
+      .mockResolvedValueOnce({ id: 'p1', name: 'workspace', path: '/tmp/workspace' })
     const project = await useProjectStore().create('/tmp/workspace')
     expect(project.isGitRepository).toBe(true)
     expect(runtimeRequest).toHaveBeenNthCalledWith(2, 'workspace.git.initialize', { path: '/tmp/workspace' })
@@ -63,7 +64,7 @@ describe('application stores', () => {
       writable: true, createdAt: '2026-01-01', updatedAt: '2026-01-01',
     })
     projects.activeProjectId = 'p1'
-    vi.mocked(runtimeRequest).mockResolvedValue({ sessionId: 's1' })
+    vi.mocked(runtimeRequest).mockResolvedValue({ sessionId: 's1', projectId: 'p1', workflowId: 'w1' })
     const sessions = useSessionStore()
     const session = await sessions.create('测试')
     expect(session.projectId).toBe('p1')
@@ -77,5 +78,42 @@ describe('application stores', () => {
     ui.toggleSidebar()
     expect(ui.theme).toBe('dark')
     expect(ui.sidebarCollapsed).toBe(true)
+  })
+})
+
+describe('persistent session history', () => {
+  beforeEach(() => { setActivePinia(createPinia()); vi.mocked(runtimeRequest).mockReset() })
+
+  it('reloads interrupted sessions and keeps internal agent attribution', async () => {
+    vi.mocked(runtimeRequest).mockResolvedValueOnce({ sessions: [{ id: 's1', title: '历史', status: 'interrupted' }] })
+      .mockResolvedValueOnce({ id: 's1', title: '历史', workflowId: 'flow', status: 'interrupted', messages: [
+        { id: 'm1', seq: 2, role: 'assistant', content: '审查意见', agentRunId: 'agent-run', visibility: 'internal' },
+      ] })
+    const sessions = useSessionStore()
+    await sessions.loadAll()
+    expect(sessions.getSession('s1')?.status).toBe('interrupted')
+    await sessions.load('s1')
+    expect(sessions.getSession('s1')?.messages[0]?.agentRunId).toBe('agent-run')
+    expect(sessions.getSession('s1')?.messages[0]?.visibility).toBe('internal')
+    expect(sessions.getSession('s1')?.workflowId).toBe('flow')
+  })
+
+  it('paginates older messages without duplication', async () => {
+    const sessions = useSessionStore()
+    sessions.upsert({ id: 's', nextBeforeSeq: 3, messages: [{ id: 'm3', seq: 3, role: 'user', content: 'three' }] })
+    vi.mocked(runtimeRequest).mockResolvedValue({ messages: [
+      { id: 'm1', seq: 1, role: 'user', content: 'one' }, { id: 'm3', seq: 3, role: 'user', content: 'three' },
+    ], nextBeforeSeq: null })
+    await sessions.loadOlder('s')
+    expect(sessions.getSession('s')?.messages.map((item) => item.id)).toEqual(['m1', 'm3'])
+    expect(sessions.getSession('s')?.nextBeforeSeq).toBeNull()
+  })
+
+  it('does not remove a session when the backend refuses deletion', async () => {
+    const sessions = useSessionStore()
+    sessions.upsert({ id: 's', title: 'running', status: 'running' })
+    vi.mocked(runtimeRequest).mockRejectedValue(new Error('会话已有活动运行'))
+    await expect(sessions.delete('s')).rejects.toThrow('活动运行')
+    expect(sessions.getSession('s')).toBeDefined()
   })
 })

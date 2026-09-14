@@ -17,7 +17,7 @@ interface RuntimeUpdate {
   state?: JsonRecord & { goal?: unknown; report?: unknown; tasks?: JsonRecord[]; results?: JsonRecord[] }
   interruptions?: JsonRecord[]
 }
-interface RuntimeInitializeResult { protocolVersion?: string | number; capabilities?: string[] }
+interface RuntimeInitializeResult { databasePath?: string; protocolVersion?: string | number; capabilities?: string[] }
 interface McpCatalogResult { packages?: McpPackage[]; pluginErrors?: Record<string, string> }
 interface McpConnectionsResult { packages?: McpConnection[] }
 interface McpServersResult { servers?: McpConnection[] }
@@ -82,8 +82,14 @@ export const useRuntimeStore = defineStore('runtime', {
           await connectRuntime()
           if (!unsubscribe) unsubscribe = onRuntimeEvent((event) => this.handleEvent(event))
           const result = await runtimeRequest<RuntimeInitializeResult>('runtime.initialize')
-          this.info = { status: 'connected', mode: 'stdio/websocket', version: String(result.protocolVersion ?? PROTOCOL_VERSION_TEXT), databasePath: '', activeRuns: 0, capabilities: result.capabilities ?? [] }
+          this.info = { status: 'connected', mode: 'stdio/websocket', version: String(result.protocolVersion ?? PROTOCOL_VERSION_TEXT), databasePath: result.databasePath ?? '', activeRuns: 0, capabilities: result.capabilities ?? [] }
           await useProjectStore().loadAll()
+          await useSessionStore().loadAll()
+          this.approvals = []
+          for (const session of useSessionStore().sessions.filter((item) => item.status === 'waiting')) {
+            const loaded = await useSessionStore().load(session.id)
+            for (const pending of loaded.approvals.filter((item) => item.status === 'pending')) this.approvals.push({ ...pending, id: pending.interruptId || pending.id })
+          }
           this.connectionStatus = 'connected'
         } catch (error) {
           this.connectionStatus = 'disconnected'
@@ -99,6 +105,7 @@ export const useRuntimeStore = defineStore('runtime', {
       await restartRuntimeBroker()
       useSessionStore().sessions = []
       this.approvals = []
+      useProjectStore().loaded = false
       await this.initialize()
     },
     async startRun(sessionId: string, goal: string, attachments: AttachmentRef[] = []) {
@@ -112,8 +119,9 @@ export const useRuntimeStore = defineStore('runtime', {
       })
       session.status = 'running'; session.updatedAt = now; this.info.activeRuns += 1
       try {
-        const update = await runtimeRequest<RuntimeUpdate>('run.start', { sessionId, goal })
+        const update = await runtimeRequest<RuntimeUpdate>('run.start', { sessionId, goal, requestKey: crypto.randomUUID() })
         this.applyUpdate(update)
+        await sessions.load(sessionId)
         return update
       } catch (error) {
         session.status = 'failed'
@@ -136,6 +144,7 @@ export const useRuntimeStore = defineStore('runtime', {
         })
         request.status = response === false || (isRecord(response) && response.approved === false) ? 'rejected' : 'approved'
         this.applyUpdate(update)
+        await useSessionStore().load(request.sessionId)
       } catch (error) {
         const session = useSessionStore().getSession(request.sessionId)
         const run = session?.runs.find((item) => item.id === request.runId)
@@ -183,12 +192,14 @@ export const useRuntimeStore = defineStore('runtime', {
     addInterruption(sessionId: string, runId: string, pending: JsonRecord) {
       const id = String(pending.interruptId ?? '')
       if (!id || this.approvals.some((item) => item.id === id)) return
-      const kind = pending.kind === 'clarification' || pending.kind === 'evaluation' ? pending.kind : 'approval'
+      const kind = pending.kind === 'clarification' || pending.kind === 'evaluation' || pending.kind === 'decision' ? pending.kind : 'approval'
       this.approvals.push({
         id, interruptId: id, sessionId, runId, kind,
+        previewRequired: Boolean(pending.previewRequired),
+        actions: Array.isArray(pending.actions) ? pending.actions.map(String) : undefined,
         action: String(pending.action ?? pending.question ?? (kind === 'approval' ? '执行受保护操作' : '需要你的输入')),
         question: String(pending.question ?? ''), risk: String(pending.risk ?? kind),
-        details: String(pending.details ?? ''), status: 'pending',
+        details: String(pending.details ?? (pending.args ? JSON.stringify(pending.args) : '')), status: 'pending',
       })
     },
     async handleEvent(event: RuntimeEvent) {
@@ -206,7 +217,7 @@ export const useRuntimeStore = defineStore('runtime', {
         }
         session.status = 'running'
       }
-      if (event.type === 'run.completed') this.applyUpdate(payload as unknown as RuntimeUpdate)
+      if (['run.completed', 'run.failed', 'run.cancelled', 'run.interrupted'].includes(event.type)) this.applyUpdate(payload as unknown as RuntimeUpdate)
       if (['approval.required', 'clarification.required', 'evaluation.required', 'run.input_required'].includes(event.type)) {
         this.addInterruption(sessionId, runId, payload)
       }

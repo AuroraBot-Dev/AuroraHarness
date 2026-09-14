@@ -34,6 +34,9 @@ export function normalizeMessage(raw: Json, sessionId: string): ConversationMess
     createdAt: text(raw.created_at ?? raw.createdAt, new Date().toISOString()),
     status: choice(raw.status, ['streaming', 'completed', 'failed'], 'completed'),
     kind: choice(raw.kind, ['message', 'report', 'error', 'tool'], 'message'),
+    agentRunId: text(raw.agentRunId ?? raw.agent_run_id) || null,
+    visibility: choice(raw.visibility, ['public', 'internal'] as const, 'public'),
+    seq: Number(raw.seq ?? 0),
     attachments: list(raw.attachments).map(normalizeAttachment),
   }
 }
@@ -41,7 +44,7 @@ export function normalizeMessage(raw: Json, sessionId: string): ConversationMess
 export function normalizeRun(raw: Json, sessionId: string): RunRecord {
   return {
     id: text(raw.id), sessionId: text(raw.session_id ?? raw.sessionId, sessionId),
-    objective: text(raw.objective), status: choice(raw.status, ['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled'], 'queued'), error: text(raw.error),
+    objective: text(raw.objective), status: choice(raw.status, ['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'], 'queued'), error: text(raw.error),
     createdAt: text(raw.created_at ?? raw.createdAt, new Date().toISOString()),
     updatedAt: text(raw.updated_at ?? raw.updatedAt, new Date().toISOString()),
     retryOfRunId: text(raw.retry_of_run_id ?? raw.retryOfRunId) || null,
@@ -57,7 +60,7 @@ export function normalizeTask(raw: Json, sessionId: string, runId = ''): TaskNod
     description: text(raw.description, '未命名任务'),
     tool: text(raw.tool),
     effort: choice(raw.effort, ['low', 'medium', 'high'], 'medium'),
-    status: choice(raw.status, ['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled'], 'queued'), output: text(raw.output), error: text(raw.error),
+    status: choice(raw.status, ['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'], 'queued'), output: text(raw.output), error: text(raw.error),
     createdAt: text(raw.created_at ?? raw.createdAt), updatedAt: text(raw.updated_at ?? raw.updatedAt),
   }
 }
@@ -83,15 +86,21 @@ export function normalizeSession(raw: Json): SessionRecord {
     id,
     title: text(raw.title, '未命名会话'),
     projectId: text(raw.project_id ?? raw.projectId) || null,
+    workflowId: text(raw.workflowId) || null,
+    nextBeforeSeq: typeof raw.nextBeforeSeq === 'number' ? raw.nextBeforeSeq : null,
     createdAt: text(raw.created_at ?? raw.createdAt, new Date().toISOString()),
     updatedAt: text(raw.updated_at ?? raw.updatedAt, new Date().toISOString()),
-    status: choice(raw.status ?? raw.run_status, ['idle', 'queued', 'running', 'waiting', 'completed', 'failed', 'cancelled'], runs.at(-1)?.status ?? 'idle'),
+    status: choice(raw.status ?? raw.run_status, ['idle', 'queued', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'], runs.at(-1)?.status ?? 'idle'),
     messages: list(raw.messages).map((item) => normalizeMessage(item, id)),
     runs,
     tasks: list(raw.tasks).map((item) => normalizeTask(item, id, latestRun)).concat(nestedTasks),
     approvals: list(raw.approvals).map((item) => ({
-      id: text(item.id), sessionId: text(item.session_id, id), runId: text(item.run_id), taskId: text(item.task_id) || null,
-      action: text(item.action), risk: text(item.risk), status: choice(item.status, ['pending', 'approved', 'rejected', 'expired'], 'pending'),
+      id: text(item.id), sessionId: text(item.sessionId ?? item.session_id, id), runId: text(item.runId ?? item.run_id), taskId: text(item.task_id) || null,
+      kind: choice(item.kind, ['approval', 'clarification', 'evaluation', 'decision'] as const, 'approval'),
+      previewRequired: Boolean(item.previewRequired),
+      question: text(item.question), interruptId: text(item.interruptId),
+      actions: Array.isArray(item.actions) ? item.actions.map(String) : undefined,
+      action: text(item.action ?? item.tool), risk: text(item.risk), status: choice(item.status, ['pending', 'approved', 'rejected', 'expired'], 'expired'),
     })),
   }
 }

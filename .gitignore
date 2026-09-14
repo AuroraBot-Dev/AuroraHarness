@@ -29,6 +29,10 @@ src-tauri/resources/sidecar/*
 *.sqlite3-*
 *.db
 *.db-*
+*.runtime.lock
+artifacts/
+smoke-tests/
+deepseek-flash-live-test.json
 *.log
 logs/
 

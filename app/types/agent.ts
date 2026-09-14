@@ -3,8 +3,8 @@ import type { PROTOCOL_VERSION } from '~/utils/protocol'
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'restarting'
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type TaskEffort = 'low' | 'medium' | 'high'
-export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
-export type RunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
+export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+export type RunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 export type SessionStatus = 'idle' | RunStatus
 
 export interface AttachmentRef {
@@ -24,6 +24,9 @@ export interface ConversationMessage {
   createdAt: string
   status: 'streaming' | 'completed' | 'failed'
   kind: 'message' | 'report' | 'error' | 'tool'
+  agentRunId?: string | null
+  visibility?: 'public' | 'internal'
+  seq?: number
   attachments: AttachmentRef[]
 }
 
@@ -68,6 +71,8 @@ export interface SessionRecord {
   id: string
   title: string
   projectId: string | null
+  workflowId?: string | null
+  nextBeforeSeq?: number | null
   createdAt: string
   updatedAt: string
   status: SessionStatus
@@ -86,8 +91,10 @@ export interface ApprovalRequest {
   risk: string
   details?: string
   status: 'pending' | 'approved' | 'rejected' | 'expired'
-  kind?: 'approval' | 'clarification' | 'evaluation'
+  kind?: 'approval' | 'clarification' | 'evaluation' | 'decision'
   question?: string
+  previewRequired?: boolean
+  actions?: string[]
   interruptId?: string
 }
 
