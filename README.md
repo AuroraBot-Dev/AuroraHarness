@@ -110,6 +110,7 @@ cd src/frontend && pnpm lint && pnpm typecheck && pnpm test
 
 ## 各层文档
 
+- 文档索引：[`docs/README.md`](docs/README.md)（区分现行文档与历史文档）
 - 前端层：[`src/frontend/README.md`](src/frontend/README.md)
 - Tauri 胶水层：[`src/tauri/README.md`](src/tauri/README.md)
 - 纯 Rust 层：[`src/rust/README.md`](src/rust/README.md)
