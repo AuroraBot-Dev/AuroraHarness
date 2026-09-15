@@ -44,19 +44,17 @@ jobs:
       - run: uv run --frozen ruff check .
       - run: uv run --frozen ruff format --check .
       - run: uv run --frozen pyright
+      # 先把浏览器装上，让预览测试在主测试里真正执行，而不是被 skip 掩盖。
+      - name: 安装 Chromium
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run --frozen playwright install --with-deps chromium
       - run: uv run --frozen pytest -v
       # 冒烟：两个分布的入口都能导入（re-export 与实现文件必须同步）。
       - run: >-
           uv run --frozen python -c
           "from aurora.agent.transport import serve_websocket; from aurora.cli.main import build_parser"
 
-      # 下面几步只在一个平台跑，避免同一件事重复六次。
-      - name: 安装 Chromium，真正执行浏览器预览测试
-        if: matrix.os == 'ubuntu-latest'
-        run: uv run --frozen playwright install --with-deps chromium
-      - name: 浏览器预览测试
-        if: matrix.os == 'ubuntu-latest'
-        run: uv run --frozen pytest src/agent/tests/test_preview.py -v
+      # 下面两步只在一个平台跑，避免同一件事重复六次。
       - run: uv run --frozen pip-audit
         if: matrix.os == 'ubuntu-latest'
 

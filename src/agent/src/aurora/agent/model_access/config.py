@@ -21,7 +21,9 @@ def build_llm():
     """
     api_key = os.getenv("AGENT_API_KEY") or os.getenv("OPENAI_API_KEY")
     model = os.getenv("AGENT_MODEL")
-    base_url = os.getenv("AGENT_BASE_URL", "https://api.openai.com/v1")
+    # 空值等价于未设置：`.env.example` 里 `AGENT_*=` 是空串，若按「有默认值」处理，
+    # 会得到一个非法的 base_url 或空模型名。凡是从 .env 读取的可选配置都要用这种写法。
+    base_url = os.getenv("AGENT_BASE_URL") or "https://api.openai.com/v1"
 
     missing = []
     if not api_key:

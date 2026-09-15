@@ -18,6 +18,11 @@ from ..tools.base import RiskLevel, Tool
 GitView = Literal["run", "workspace"]
 DIFF_LIMIT = 256 * 1024
 
+# Git 的输入与输出一律按 UTF-8 处理。默认的 `text=True` 会用宿主 locale 编码——英文
+# Windows 上是 cp1252，遇到中文文件名会在编码输入或解码输出时直接抛 UnicodeEncodeError，
+# 或者解出乱码路径。仓库本身是 UTF-8，所以这里不给 locale 留余地。
+_GIT_TEXT: dict[str, Any] = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
 
 class GitError(ValueError):
     """表示可向用户展示的 Git 操作错误。"""
@@ -77,15 +82,15 @@ class GitRepository:
         probe = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             capture_output=True,
-            text=True,
             check=False,
+            **_GIT_TEXT,
         )
         if probe.returncode != 0:
             initialized = subprocess.run(
                 ["git", "-C", str(path), "init"],
                 capture_output=True,
-                text=True,
                 check=False,
+                **_GIT_TEXT,
             )
             if initialized.returncode != 0:
                 raise GitError(initialized.stderr.strip() or "Git 仓库初始化失败")
@@ -477,10 +482,10 @@ class GitRepository:
         result = subprocess.run(
             ["git", "-C", str(cwd or getattr(self, "root", self.workspace)), *args],
             capture_output=True,
-            text=True,
             input=stdin,
             env={**os.environ, **(env or {})},
             check=False,
+            **_GIT_TEXT,
         )
         if check and result.returncode != 0:
             raise GitError(result.stderr.strip() or result.stdout.strip() or "Git 命令执行失败")

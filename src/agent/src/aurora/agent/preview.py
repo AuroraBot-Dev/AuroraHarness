@@ -6,7 +6,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlsplit
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 DEFAULT_VIEWPORTS = [{"width": 1440, "height": 900}, {"width": 390, "height": 844}]
 
@@ -56,6 +56,9 @@ class BrowserCapture:
         from playwright.sync_api import sync_playwright
 
         config = validate_preview(config, sandbox)
+        # 预览服务只在本机，探测可达性时必须绕开系统代理：CI（以及不少公司网络）会设置
+        # HTTP_PROXY，此时连 127.0.0.1 也会被转发出去，表现为「预览服务启动超时」。
+        opener = build_opener(ProxyHandler({}))
         cancelled = threading.Event()
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = (
@@ -69,7 +72,7 @@ class BrowserCapture:
                 deadline = time.monotonic() + 20
                 while True:
                     try:
-                        with urlopen(config["url"], timeout=1) as response:
+                        with opener.open(config["url"], timeout=1) as response:
                             if response.status >= 400:
                                 raise ValueError("预览服务返回错误")
                         break

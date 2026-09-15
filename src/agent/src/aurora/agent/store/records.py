@@ -173,7 +173,7 @@ class Records:
                 "provider",
                 {
                     "name": "默认供应商",
-                    "base_url": os.getenv("AGENT_BASE_URL", "https://api.openai.com/v1"),
+                    "base_url": os.getenv("AGENT_BASE_URL") or "https://api.openai.com/v1",
                     "credential_ref": "env:AGENT_API_KEY"
                     if os.getenv("AGENT_API_KEY")
                     else "env:OPENAI_API_KEY",
@@ -184,7 +184,7 @@ class Records:
                 {
                     "name": "默认模型",
                     "provider_id": provider["id"],
-                    "model_name": os.getenv("AGENT_MODEL", "unconfigured"),
+                    "model_name": os.getenv("AGENT_MODEL") or "unconfigured",
                 },
             )
             agent = self.save("agent", {"name": "Aurora", "model_config_id": model["id"]})
