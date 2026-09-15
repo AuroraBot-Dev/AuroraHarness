@@ -26,7 +26,7 @@ def test_existing_sqlite_database_supports_tracked_entities(tmp_path):
     stamp = now()
     with closing(sqlite3.connect(path)) as connection, connection:
         migration = Path(__file__).parents[1] / "src/aurora/agent/store/migrations/001_initial.sql"
-        connection.executescript(migration.read_text())
+        connection.executescript(migration.read_text(encoding="utf-8"))
         connection.execute(
             "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
         )

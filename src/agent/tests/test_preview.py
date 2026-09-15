@@ -61,24 +61,26 @@ def test_preview_command_cancellation_stops_before_timeout(tmp_path):
 
 
 def test_real_browser_capture_and_preview_cleanup(tmp_path):
-    from playwright.sync_api import Error as PlaywrightError
+    playwright = pytest.importorskip("playwright.sync_api")
+    # 先确认浏览器可用，再启动预览服务：缺 Chromium 时应当明确跳过，而不是先拉起一个服务、
+    # 然后在一次与浏览器无关的等待里失败（macOS 的 CI 机器上就是这样被误报成产品缺陷的）。
+    with playwright.sync_playwright() as runtime:
+        try:
+            runtime.chromium.launch().close()
+        except playwright.Error as exc:
+            pytest.skip(f"未安装 Chromium（uv run playwright install chromium）：{exc}")
 
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
     (tmp_path / "index.html").write_text("<!doctype html><h1>Aurora preview</h1>", encoding="utf-8")
     config = {
         "url": f"http://127.0.0.1:{port}",
         "command": _command(sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"),
     }
-    try:
-        screenshots, log = BrowserCapture().capture(
-            config, Sandbox(tmp_path, executor=UnsafeSubprocessExecutor())
-        )
-    except PlaywrightError as exc:
-        if "Executable doesn't exist" in str(exc):
-            pytest.skip("运行 uv run playwright install chromium 后可测试真实浏览器")
-        raise
+    screenshots, _ = BrowserCapture().capture(
+        config, Sandbox(tmp_path, executor=UnsafeSubprocessExecutor())
+    )
     assert len(screenshots) == 2
     assert all(data.startswith(b"\x89PNG") for data, _ in screenshots)
     assert [metadata["viewport"]["width"] for _, metadata in screenshots] == [1440, 390]

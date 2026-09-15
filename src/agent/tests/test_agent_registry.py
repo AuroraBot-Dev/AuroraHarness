@@ -90,13 +90,13 @@ def test_delegate_multiple_approvals_do_not_replay(tmp_path, monkeypatch):
         runtime.records.save("agent", {"enabled": False, "instructions": "新 Prompt"}, child["id"])
         result = session.resume(result.run_id, {"approved": True})
         assert result.status == "waiting"
-        assert (workspace / "1.txt").read_text() == "1"
+        assert (workspace / "1.txt").read_text(encoding="utf-8") == "1"
         assert not (workspace / "2.txt").exists()
-        (workspace / "1.txt").write_text("不要重放")
+        (workspace / "1.txt").write_text("不要重放", encoding="utf-8")
         result = session.resume(result.run_id, {"approved": True})
         assert result.status == "completed"
-        assert (workspace / "1.txt").read_text() == "不要重放"
-        assert (workspace / "2.txt").read_text() == "2"
+        assert (workspace / "1.txt").read_text(encoding="utf-8") == "不要重放"
+        assert (workspace / "2.txt").read_text(encoding="utf-8") == "2"
         rows = runtime.records.db.rows(select(AgentRun).where(AgentRun.agent_id == child["id"]))
         assert len(rows) == 1
         assert rows[0]["parent_task_id"]
@@ -158,7 +158,7 @@ def test_registry_migrates_existing_agents(tmp_path):
     connection = sqlite3.connect(path)
     sql = (
         Path(__file__).parents[1] / "src/aurora/agent/store/migrations/001_initial.sql"
-    ).read_text()
+    ).read_text(encoding="utf-8")
     connection.executescript(sql)
     connection.execute(
         "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT)"
@@ -405,7 +405,7 @@ def test_child_clarification_updates_tasks_and_resumes(tmp_path, monkeypatch):
         assert json.loads(rows[0]["args_json"])["content"] == "new"
         result = session.resume(result.run_id, {"approved": True})
         assert result.status == "completed"
-        assert (workspace / "chosen.txt").read_text() == "new"
+        assert (workspace / "chosen.txt").read_text(encoding="utf-8") == "new"
     finally:
         runtime.close()
 

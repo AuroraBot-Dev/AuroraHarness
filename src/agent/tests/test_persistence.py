@@ -328,7 +328,9 @@ def test_persistence_protocol_roundtrip_and_deletion(tmp_path):
 def test_failed_migration_rolls_back_ddl_and_version(tmp_path, monkeypatch):
     db = Database(tmp_path / "migration.db")
     migration = tmp_path / "003_broken.sql"
-    migration.write_text("CREATE TABLE partial(id TEXT); INSERT INTO nonexistent VALUES (1);")
+    migration.write_text(
+        "CREATE TABLE partial(id TEXT); INSERT INTO nonexistent VALUES (1);", encoding="utf-8"
+    )
     original_glob = __import__("pathlib").Path.glob
     monkeypatch.setattr(
         "pathlib.Path.glob",
