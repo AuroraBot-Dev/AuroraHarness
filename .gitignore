@@ -41,6 +41,7 @@ target/
 src/tauri/gen/
 .cargo-home/
 .tmp-sidecar-venv/
+.tmp-sidecar-dist/
 # sidecar 由 src/tauri/scripts/build-sidecar.sh 生成，产物不入库
 src/tauri/resources/sidecar/*
 !src/tauri/resources/sidecar/.gitkeep

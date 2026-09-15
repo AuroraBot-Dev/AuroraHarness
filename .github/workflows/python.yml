@@ -46,6 +46,10 @@ jobs:
           uv run --frozen python -c
           "from aurora.agent.transport import serve_websocket; from aurora.cli.main import build_parser"
       - run: uv run --frozen pip-audit
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gitleaks-action 对组织仓库要求付费 License，这里直接用 OSS 版 CLI；
+      # 版本写死以便复现（与本地跑的结果一致：全历史无告警）。
+      - name: 密钥扫描（gitleaks）
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks detect --source . --redact --no-banner

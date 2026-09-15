@@ -17,5 +17,5 @@ pub mod status;
 pub use broker::{BrokerOptions, RuntimeBroker};
 pub use event::{EventSink, NullEventSink};
 pub use launch::{repo_root_from, runtime_command, Launch};
-pub use secrets::{redact_text, take_secret_update, KeyringSecretStore, SecretStore};
+pub use secrets::{redact_text, take_secret_update, NullSecretStore, SecretStore};
 pub use status::RuntimeStatus;

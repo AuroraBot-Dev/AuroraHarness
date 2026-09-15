@@ -20,7 +20,7 @@
 |---|---|---|---|---|
 | 前端 | `src/frontend` | Nuxt 4 + Vue 3 + TS | 界面、状态管理、协议客户端、E2E | 不碰进程管理，不知道 Python 怎么启动 |
 | Tauri 胶水 | `src/tauri` | Rust + Tauri 2 | 暴露命令、把 `AppHandle` 接成事件桥、钥匙串读写、打包配置 | 不含代理逻辑，不知道怎么收发 NDJSON |
-| 纯 Rust | `src/rust` | Rust | 协议 v1 契约、Python 子进程监管、请求/响应关联、密钥脱敏 | 不依赖 tauri，不认识 UI |
+| 纯 Rust | `src/rust` | Rust | 协议 v1 契约、Python 子进程监管、请求/响应关联、密钥脱敏 | 不依赖 tauri 与平台集成库（keyring/dbus），不认识 UI |
 | python-agent | `src/agent` | Python | 运行时、委派图、工具、沙箱、存储、传输协议 | 不导入 `aurora.cli` |
 | python-cli | `src/cli` | Python | 参数解析、子命令注册、退出码 | 不承载业务逻辑 |
 
@@ -37,11 +37,13 @@ src/frontend ──(Tauri IPC)──▶ src/tauri ──▶ src/rust ──(stdi
 | 边界 | 为什么重要 | 如何守住 |
 |---|---|---|
 | `src/agent` 不导入 `aurora.cli` | agent 必须能脱离 CLI 独立安装 | `src/agent/tests/test_layering.py` 用 AST 扫描全部源码 |
-| `src/rust/aurora-runtime-broker` 不依赖 `tauri` | 代理必须能脱离桌面壳编译与测试 | CI 里 `cargo tree -p aurora-runtime-broker` 断言无 tauri |
+| `src/rust/aurora-runtime-broker` 不依赖 `tauri` / `keyring` / `dbus` | 代理必须能零系统依赖地脱离桌面壳编译与测试 | CI 里 `cargo tree -p aurora-runtime-broker` 断言依赖树中不含这些 |
 | 前端不知道 Python 怎么启动 | 换传输方式不应改动界面代码 | 前端只依赖协议客户端（`app/utils/runtimeClient.ts`）与 IPC 命令 |
 
 `src/tauri/src/bridge.rs` 是唯一允许同时知道 Tauri 与代理两边的地方：它把 `AppHandle`
 实现成 `EventSink`、把系统钥匙串实现成 `SecretStore`，然后交给代理。代理只认这两个 trait。
+钥匙串实现之所以放在壳里而不是代理里，是因为它是平台集成——Linux 的 Secret Service 后端
+要求 dbus，一旦放进代理层，这个「纯」层就会被迫依赖系统库。
 
 ## 协议 v1
 
@@ -80,6 +82,10 @@ src/frontend ──(Tauri IPC)──▶ src/tauri ──▶ src/rust ──(stdi
 
 开发态回退的工作目录由 `repo_root_from("<repo>/src/tauri")` 推出仓库根——`uv` 必须在
 uv 工作区根执行才能解析 `aurora` 命令。
+
+第二种方式（bundle 内置解释器）的目录约定见 [`src/tauri/README.md`](../src/tauri/README.md)：
+依赖必须合并进解释器自身的 `site-packages`，不能靠 `PYTHONPATH` 旁挂——`.pth` 只在解释器
+自身的 `site-packages` 下执行，而 pywin32 的 DLL bootstrap 正是 `.pth`。
 
 ## Tauri CLI 如何定位壳工程
 

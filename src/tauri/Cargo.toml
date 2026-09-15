@@ -15,6 +15,12 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 aurora-protocol = { path = "../rust/aurora-protocol" }
 aurora-runtime-broker = { path = "../rust/aurora-runtime-broker" }
+keyring = { version = "3", default-features = false, features = [
+  "apple-native",
+  "windows-native",
+  "linux-native-sync-persistent",
+  "crypto-rust",
+] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde_json = "1"

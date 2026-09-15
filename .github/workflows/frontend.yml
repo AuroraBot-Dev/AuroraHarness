@@ -36,8 +36,11 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test:coverage
       - run: pnpm audit --prod --audit-level high
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gitleaks-action 对组织仓库要求付费 License，这里直接用 OSS 版 CLI。
+      - name: 密钥扫描（gitleaks）
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks detect --source . --redact --no-banner
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e

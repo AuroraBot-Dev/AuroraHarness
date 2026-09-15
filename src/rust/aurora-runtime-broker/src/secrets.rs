@@ -1,13 +1,14 @@
-//! 模型 API Key 的存取与脱敏。
+//! 模型 API Key 的存取契约与脱敏。
 //!
-//! 发布版的密钥只落在系统钥匙串里；环境变量仅用于开发/测试注入。密钥本身绝不进入
-//! 协议帧、图状态、日志或 SQLite——[`take_secret_update`] 负责把它从请求里摘掉。
+//! 这里只放**与平台无关**的部分：存取契约、从请求里摘出密钥、以及脱敏。具体的钥匙串
+//! 实现由外层提供——Linux 的 Secret Service 需要 dbus、Windows 用凭据管理器，属于平台
+//! 集成，放在这一层会让代理被迫依赖系统库。
 
 use serde_json::Value;
 
 /// 密钥的存取后端。
 ///
-/// 抽象成 trait 是为了让代理层不绑定具体凭据系统，测试可使用内存实现。
+/// 抽象成 trait 是为了让代理层不绑定具体凭据系统：桌面壳接系统钥匙串，测试接内存实现。
 pub trait SecretStore: Send + Sync {
     /// 读取已保存的密钥；未配置或后端不可用时返回 `None`。
     fn get(&self) -> Option<String>;
@@ -24,42 +25,21 @@ pub trait SecretStore: Send + Sync {
     }
 }
 
-/// 基于系统钥匙串的实现（macOS Keychain / Windows Credential Manager / Linux Secret Service）。
-pub struct KeyringSecretStore {
-    service: String,
-    user: String,
-}
+/// 不保存任何密钥的实现：用于无钥匙串场景与测试。
+#[derive(Debug, Default)]
+pub struct NullSecretStore;
 
-impl KeyringSecretStore {
-    pub fn new(service: impl Into<String>, user: impl Into<String>) -> Self {
-        Self {
-            service: service.into(),
-            user: user.into(),
-        }
-    }
-
-    fn entry(&self) -> Result<keyring::Entry, keyring::Error> {
-        keyring::Entry::new(&self.service, &self.user)
-    }
-}
-
-impl SecretStore for KeyringSecretStore {
+impl SecretStore for NullSecretStore {
     fn get(&self) -> Option<String> {
-        self.entry().ok()?.get_password().ok()
+        None
     }
 
-    fn set(&self, secret: &str) -> Result<(), String> {
-        self.entry()
-            .and_then(|entry| entry.set_password(secret))
-            .map_err(|_| "API Key 无法写入系统钥匙串".to_string())
+    fn set(&self, _secret: &str) -> Result<(), String> {
+        Err("当前环境未提供密钥存储".into())
     }
 
     fn delete(&self) -> Result<(), String> {
-        let entry = self.entry().map_err(|_| "系统钥匙串不可用".to_string())?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err("API Key 无法从系统钥匙串删除".into()),
-        }
+        Ok(())
     }
 }
 

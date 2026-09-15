@@ -38,9 +38,10 @@ pub fn runtime_command(resource_dir: &Path, dev_repo_root: &Path) -> Launch {
         "bin/python3"
     });
     if python.exists() {
+        // 依赖在打包时已合并进解释器自身的 site-packages，因此不需要 PYTHONPATH：
+        // .pth 与 DLL bootstrap 只在解释器自身的 site-packages 下生效。
         let mut command = Command::new(python);
         command.args(["-m", "aurora.cli.main", "runtime"]);
-        command.env("PYTHONPATH", sidecar.join("site-packages"));
         return Launch {
             command,
             cwd: resource_dir.to_path_buf(),

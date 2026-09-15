@@ -34,11 +34,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p aurora-protocol -p aurora-runtime-broker
-      # 分层守卫：运行时代理必须与 Tauri 解耦，否则它就不再能脱离桌面壳单独编译。
-      - name: 断言 broker 不依赖 tauri
+      # 分层守卫：代理层必须与桌面壳、平台集成库解耦，否则 Linux 上就要装 dbus 等系统库，
+      # 「可脱离桌面壳单独编译与测试」也就不成立了。
+      - name: 断言代理层不含桌面壳与平台集成依赖
         run: |
-          if cargo tree -p aurora-runtime-broker --prefix none | grep -qE '\btauri(-[a-z]+)* v'; then
-            echo "::error::aurora-runtime-broker 不应依赖 tauri"
+          tree="$(cargo tree -p aurora-runtime-broker --prefix none)"
+          if grep -qiE '\b(tauri(-[a-z]+)*|keyring|dbus|secret-service) v' <<<"$tree"; then
+            echo "::error::aurora-runtime-broker 不得依赖桌面壳或平台集成库"
+            grep -iE '\b(tauri(-[a-z]+)*|keyring|dbus|secret-service) v' <<<"$tree"
             exit 1
           fi
 
@@ -52,5 +55,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev \
+            libdbus-1-dev pkg-config
       - run: cargo check -p aurora-desktop

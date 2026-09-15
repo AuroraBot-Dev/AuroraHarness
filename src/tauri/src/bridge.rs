@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use aurora_runtime_broker::event::EventSink;
 use aurora_runtime_broker::launch::repo_root_from;
-use aurora_runtime_broker::secrets::{KeyringSecretStore, SecretStore};
+use aurora_runtime_broker::secrets::SecretStore;
 use aurora_runtime_broker::status::RuntimeStatus;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
@@ -20,6 +20,48 @@ use tauri::{AppHandle, Emitter};
 pub const KEYRING_SERVICE: &str = "com.aurora.agent";
 /// 系统钥匙串中的账号名。
 pub const KEYRING_USER: &str = "model-api-key";
+
+/// 基于系统钥匙串的密钥实现（macOS Keychain / Windows 凭据管理器 / Linux Secret Service）。
+///
+/// 刻意留在壳这一层而不是代理层：钥匙串是平台集成，Linux 后端依赖 dbus，放进纯 Rust 层
+/// 会让代理被迫依赖系统库，也就失去了「可脱离桌面壳单独编译」的意义。
+pub struct KeyringSecretStore {
+    service: String,
+    user: String,
+}
+
+impl KeyringSecretStore {
+    pub fn new(service: impl Into<String>, user: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+            user: user.into(),
+        }
+    }
+
+    fn entry(&self) -> Result<keyring::Entry, keyring::Error> {
+        keyring::Entry::new(&self.service, &self.user)
+    }
+}
+
+impl SecretStore for KeyringSecretStore {
+    fn get(&self) -> Option<String> {
+        self.entry().ok()?.get_password().ok()
+    }
+
+    fn set(&self, secret: &str) -> Result<(), String> {
+        self.entry()
+            .and_then(|entry| entry.set_password(secret))
+            .map_err(|_| "API Key 无法写入系统钥匙串".to_string())
+    }
+
+    fn delete(&self) -> Result<(), String> {
+        let entry = self.entry().map_err(|_| "系统钥匙串不可用".to_string())?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err("API Key 无法从系统钥匙串删除".into()),
+        }
+    }
+}
 
 /// 通过 Tauri 事件通道把运行时状态、协议事件与诊断输出推给前端。
 pub struct TauriEventSink {

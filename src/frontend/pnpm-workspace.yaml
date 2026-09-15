@@ -4,6 +4,13 @@ allowBuilds:
   esbuild: true
   lefthook: true
   unrs-resolver: true
+
+# 上游尚未放开依赖范围，这里强制抬到已修复版本：
+# svgo <4.1.0 存在高危公告 GHSA-w27v-7q3p-w38r（经 nuxt > cssnano 传递引入），
+# 不覆盖会让 `pnpm audit --audit-level high` 在 CI 中失败。
+overrides:
+  svgo: ">=4.1.0"
+
 # 上游包在当前镜像中缺少仅导出类型的 JS 空模块，补丁保证全新安装可构建。
 patchedDependencies:
   '@volar/language-core@2.4.28': patches/volar-language-core-2.4.28.patch
