@@ -22,10 +22,10 @@ src/tauri/
 ├── tauri.conf.json       # 跨层路径：beforeDevCommand/beforeBuildCommand/frontendDist
 ├── capabilities/         # IPC 权限
 ├── icons/                # 各平台图标
-├── resources/sidecar/    # 打包时由 scripts/build-sidecar.sh 生成，产物不入库
+├── resources/sidecar/       # 打包时由 scripts/build-sidecar.mjs 生成，产物不入库
 ├── scripts/
-│   ├── build-sidecar.sh  # 把 Python 运行时连同解释器打进来
-│   └── tauri.mjs         # 让 Tauri CLI 找到 src/tauri 与 src/frontend
+│   ├── build-sidecar.mjs    # 把 Python 运行时连同解释器打进来
+│   └── tauri.mjs            # 让 Tauri CLI 找到 src/tauri 与 src/frontend
 └── src/
     ├── main.rs           # 入口，只调用 aurora_desktop_lib::run()
     ├── lib.rs            # 命令定义与 Builder 装配
@@ -45,7 +45,7 @@ Secret Service 后端要求 dbus，放进纯 Rust 层会让代理被迫依赖系
 
 ## sidecar 布局
 
-`scripts/build-sidecar.sh` 产出的结构必须与 `launch.rs` 的约定一致：
+`scripts/build-sidecar.mjs` 产出的结构必须与 `launch.rs` 的约定一致：
 
 ```
 resources/sidecar/
@@ -59,18 +59,21 @@ resources/sidecar/
 bootstrap 注册 DLL 目录；走 `PYTHONPATH` 时它不会运行，Windows 上 `import pywintypes` 会直接
 失败（整个 `mcp` 导入链随之崩掉）。
 
+脚本最后会用打包好的解释器真的导入一次 `aurora.agent` 与 `aurora.cli`：拷贝成功不等于能导入，
+上面这两个坑都是靠这道自检才在构建阶段暴露出来的。
+
 ## 构建与运行
 
 ```bash
 # 开发模式（会在 ../frontend 里起前端）
-cd src/frontend && pnpm tauri dev
+node scripts/tasks.mjs dev-desktop
 
 # 只检查 Rust 侧
 cargo check -p aurora-desktop
 
 # 打包发行版：先生成 sidecar，再构建 bundle
-make build-sidecar
-cd src/frontend && pnpm tauri build
+node scripts/tasks.mjs build-sidecar
+node scripts/tasks.mjs build-desktop
 ```
 
 `tauri.conf.json` 中的跨层路径都指回 `../frontend`，Tauri CLI 的定位方式见

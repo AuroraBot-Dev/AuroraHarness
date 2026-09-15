@@ -41,7 +41,7 @@ src/frontend/
 
 ## 开发
 
-在仓库根先装依赖（`make setup`），然后：
+在仓库根先装依赖（`node scripts/tasks.mjs setup`），然后：
 
 ```bash
 # 浏览器开发：dev 模块会自动在仓库根执行 uv run aurora runtime --port 8765

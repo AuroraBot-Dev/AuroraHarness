@@ -17,11 +17,12 @@
 前置：`uv`、Node.js 24、pnpm 11、Rust stable；做桌面开发还需要 Tauri 2 的系统依赖。
 
 ```bash
-make setup
+node scripts/tasks.mjs setup
 ```
 
-这会依次执行 `uv sync`（装好 `aurora-agent` 与 `aurora-cli`）、`pnpm install`
-（含 Nuxt 类型生成），并安装 Git 钩子。
+这条命令依次执行 `uv sync`（装好 `aurora-agent` 与 `aurora-cli`）、`pnpm install`（含 Nuxt 类型
+生成），并从仓库根安装 Git 钩子。全部常见任务都收在这一个 Node 入口里，见
+[`README.md`](README.md#任务入口)与 `node scripts/tasks.mjs help`。
 
 模型密钥只允许写在 `src/agent/.env`（已被忽略）或桌面端的系统钥匙串里，**绝不要提交到 Git**。
 
@@ -36,7 +37,7 @@ make setup
 > `.git/hooks/pre-commit`，后安装的一方会让另一方静默失效，因此已统一到 lefthook。
 > 不要重新引入 `.pre-commit-config.yaml`。
 >
-> 钩子安装由 `make setup`（即 `scripts/setup.sh`）从**仓库根**执行。不要在
+> 钩子安装由 `node scripts/tasks.mjs setup` 从**仓库根**执行。不要在
 > `src/frontend/package.json` 里加 `prepare: lefthook install`：那会在子目录里执行，
 > lefthook 找不到根配置就会就地生成一份游离的默认模板，两处配置并存后无人知道用了哪份。
 
@@ -57,7 +58,7 @@ make setup
 
 ## 提交前自检
 
-按改动层次选择，能全跑就全跑（`make test` 会都跑一遍）：
+按改动层次选择，能全跑就全跑（`node scripts/tasks.mjs test` 会都跑一遍）：
 
 ```bash
 # Python（在仓库根执行）

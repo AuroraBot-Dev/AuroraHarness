@@ -47,7 +47,7 @@ CI 的 Rust 作业断言 broker 不依赖 tauri。
 ```bash
 git clone https://github.com/AuroraBot-Dev/AuroraHarness.git
 cd AuroraHarness
-make setup          # uv sync + pnpm install（顺带装好 lefthook 钩子）
+node scripts/tasks.mjs setup     # uv sync + pnpm install + 安装 Git 钩子
 ```
 
 配置模型（密钥只写在这里，或用桌面端的系统钥匙串）：
@@ -60,32 +60,42 @@ cp src/agent/.env.example src/agent/.env
 ### 浏览器开发
 
 ```bash
-make dev-web        # 只起前端；dev 模块会自动拉起 Python 运行时
+node scripts/tasks.mjs dev-web   # 只起前端；dev 模块会自动拉起 Python 运行时
 ```
 
 打开 <http://127.0.0.1:3000>。想自己掌控运行时生命周期，就用
-`make dev-runtime` 单独起运行时，并设置 `VITE_RUNTIME_WS` 跳过自动拉起。
+`node scripts/tasks.mjs dev-runtime` 单独起运行时，并设置 `VITE_RUNTIME_WS` 跳过自动拉起。
 
 ### 桌面开发
 
 ```bash
-make dev-desktop    # Tauri 壳 + 前端热更新
+node scripts/tasks.mjs dev-desktop   # Tauri 壳 + 前端热更新
 ```
 
-## 常用命令
+## 任务入口
 
-| 命令 | 作用 |
+所有常见任务都走同一个 Node 入口，**不需要 make，也不需要 bash**——Windows 与 macOS 上是同一
+套命令，而 Node 本来就是前端层的硬依赖：
+
+```bash
+node scripts/tasks.mjs <任务> [-- 透传参数]
+node scripts/tasks.mjs help          # 列出全部任务
+```
+
+| 任务 | 作用 |
 |---|---|
-| `make setup` | 安装全部依赖（Python 工作区 + 前端 + Git 钩子） |
-| `make dev-web` | 前端开发服务器（自动拉起运行时） |
-| `make dev-runtime` | 只起 Python 运行时（WebSocket 8765） |
-| `make dev-desktop` | 桌面应用开发模式 |
-| `make lint` | Python + 前端静态检查 |
-| `make test` | 三层测试全跑一遍 |
-| `make build-sidecar` | 打包发行版用的 Python sidecar |
-| `make build-desktop` | 构建桌面发行包 |
+| `setup` | 安装全部依赖（Python 工作区 + 前端 + Git 钩子） |
+| `dev-web` | 前端开发服务器（自动拉起运行时） |
+| `dev-runtime` | 只起 Python 运行时（WebSocket 8765） |
+| `dev-desktop` | 桌面应用开发模式 |
+| `lint` / `fmt` | Python + 前端静态检查 / 自动修复 |
+| `test` | 三层测试全跑一遍（等价于 `lint` + `test-python` + `test-rust` + `test-web`） |
+| `test-python` / `test-rust` / `test-web` | 只跑某一层 |
+| `build-sidecar` | 打包发行版用的 Python sidecar |
+| `build-desktop` | 构建桌面发行包（Windows 默认只出 NSIS 的 .exe） |
+| `clean` | 清理 cargo 产物、sidecar 与前端构建输出 |
 
-也可以按层单独执行：
+想按层单独执行时也可以直接用底层命令：
 
 ```bash
 # Python（仓库根：uv 工作区）
@@ -110,13 +120,18 @@ cd src/frontend && pnpm lint && pnpm typecheck && pnpm test
 
 ## 工作区与锁定文件
 
-仓库根同时是 uv 工作区与 cargo 工作区的根：
+仓库根同时是 uv 工作区与 cargo 工作区的根，任务入口也在这里：
 
 ```
+scripts/tasks.mjs 统一任务入口（Node，跨平台）              → 无额外依赖
 pyproject.toml    uv 工作区（members: src/agent, src/cli）   → uv.lock
 Cargo.toml        cargo 工作区（members: src/rust/*, src/tauri）→ Cargo.lock
 src/frontend/     pnpm 包                                     → pnpm-lock.yaml
 ```
+
+> pnpm 必须是 **11.x**。`patches/` 下的补丁文件在 pnpm 12 上会被更严格的解析器拒绝
+> （`ERR_PNPM_INVALID_PATCH`），所以 `node scripts/tasks.mjs` 在检测到其他大版本时会自动改用
+> `npx pnpm@11`；用 corepack 固定版本可以省掉那次下载。
 
 ## 发布
 

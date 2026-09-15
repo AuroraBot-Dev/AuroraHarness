@@ -24,6 +24,17 @@ src/cli       python-cli
 
 分层详解与层间契约见 `docs/architecture.md`。
 
+# 任务入口
+
+常见任务统一走 `node scripts/tasks.mjs <任务>`（跨平台，不依赖 make 与 bash）：
+
+```bash
+node scripts/tasks.mjs help          # 全部任务
+node scripts/tasks.mjs lint          # Python + 前端静态检查
+node scripts/tasks.mjs test          # 三层测试
+node scripts/tasks.mjs build-desktop # 桌面安装包
+```
+
 # 路径约定
 
 仓库根同时是 uv 工作区根与 cargo 工作区根，因此：
@@ -35,9 +46,10 @@ src/cli       python-cli
 # 改动后必须验证
 
 ```bash
-uv run pytest && uv run ruff check . && uv run ruff format --check . && uv run pyright
-cargo test --workspace
-cd src/frontend && pnpm lint && pnpm typecheck && pnpm test
+node scripts/tasks.mjs lint      # ruff check/format + pyright + eslint
+node scripts/tasks.mjs test      # pytest + cargo test + vitest/typecheck
 ```
 
-只跑与改动层次对应的部分即可，但不要跳过。
+只跑与改动层次对应的部分即可（`test-python` / `test-rust` / `test-web`），但不要跳过。
+平台相关代码尤其要注意：CI 跑 ubuntu / windows / macos 三平台，本机绿不代表全绿，见
+`docs/architecture.md` 的「平台差异」一节。

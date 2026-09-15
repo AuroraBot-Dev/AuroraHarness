@@ -46,8 +46,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: 构建 Python sidecar
-        shell: bash
-        run: bash src/tauri/scripts/build-sidecar.sh
+        run: node src/tauri/scripts/build-sidecar.mjs
 
       - uses: tauri-apps/tauri-action@v0
         env:
