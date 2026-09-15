@@ -17,8 +17,7 @@
     "test:e2e": "playwright test",
     "test:watch": "vitest",
     "postinstall": "nuxt prepare",
-    "tauri": "node ../tauri/scripts/tauri.mjs",
-    "prepare": "lefthook install"
+    "tauri": "node ../tauri/scripts/tauri.mjs"
   },
   "dependencies": {
     "@pinia/nuxt": "^1.0.2",

@@ -9,6 +9,8 @@
 # * 前端命令用 root 切到 src/frontend，lefthook 会把 {staged_files} 改写为该目录下的
 #   相对路径，命令里无需再做路径处理。
 # * glob 按 root 下的相对路径匹配，因此前端命令不会因为 Python 改动而被触发。
+# * 前端命令直接调用 node 入口，不走 `pnpm exec`：pnpm 的 exec 会顺带跑一次隐式 install
+#   （连带 postinstall/prepare），在提交钩子里既慢又有副作用。
 #
 # parallel 关闭是有意的：有三个 stage_fixed 命令，串行执行才能保证 git index 不被并发写。
 
@@ -29,9 +31,9 @@ pre-commit:
     eslint:
       root: "src/frontend/"
       glob: "*.{ts,vue,mjs}"
-      run: pnpm exec eslint --fix {staged_files}
+      run: node node_modules/eslint/bin/eslint.js --fix {staged_files}
       stage_fixed: true
     typecheck:
       root: "src/frontend/"
       glob: "*.{ts,vue,mjs}"
-      run: pnpm typecheck
+      run: node node_modules/nuxt/bin/nuxt.mjs typecheck

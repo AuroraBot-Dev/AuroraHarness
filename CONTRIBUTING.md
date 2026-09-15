@@ -35,6 +35,10 @@ make setup
 > 合并前这里同时存在 lefthook（前端）与 pre-commit（Python）两套配置。它们会争抢同一个
 > `.git/hooks/pre-commit`，后安装的一方会让另一方静默失效，因此已统一到 lefthook。
 > 不要重新引入 `.pre-commit-config.yaml`。
+>
+> 钩子安装由 `make setup`（即 `scripts/setup.sh`）从**仓库根**执行。不要在
+> `src/frontend/package.json` 里加 `prepare: lefthook install`：那会在子目录里执行，
+> lefthook 找不到根配置就会就地生成一份游离的默认模板，两处配置并存后无人知道用了哪份。
 
 ## 提交规范
 

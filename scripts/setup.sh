@@ -20,8 +20,19 @@ if [[ ! -f src/agent/.env ]]; then
 fi
 uv sync --frozen
 
-# 前端：pnpm install 会顺带执行 nuxt prepare 与 lefthook install（钩子配置在仓库根）。
+# 前端：pnpm install 会顺带执行 nuxt prepare。
 cd "$REPO_ROOT/src/frontend"
 pnpm install --frozen-lockfile
+
+# Git 钩子必须从仓库根安装：唯一有效的配置是根目录的 lefthook.yml。若在子目录里执行，
+# lefthook 找不到配置就会就地生成一份游离的默认模板，两处配置并存会导致「到底用了哪份」
+# 完全不确定。因此钩子安装放在这里，而不是前端包的 prepare 生命周期脚本里。
+cd "$REPO_ROOT"
+LEFTHOOK="$REPO_ROOT/src/frontend/node_modules/.bin/lefthook"
+if [[ -f "$LEFTHOOK" ]]; then
+  "$LEFTHOOK" install
+else
+  echo "提示: 未找到 lefthook，跳过 Git 钩子安装。" >&2
+fi
 
 echo "Setup 完成。请检查 src/agent/.env 中的模型配置。"
