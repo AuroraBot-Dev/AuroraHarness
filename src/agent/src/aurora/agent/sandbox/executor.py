@@ -229,6 +229,19 @@ def _kill_process_tree(process: subprocess.Popen[Any]) -> None:
             return
         except (ProcessLookupError, PermissionError):
             pass
+    elif os.name == "nt":
+        # Windows 没有进程组信号：只杀直接子进程会留下孙子进程（命令解释器拉起的服务等），
+        # 它们持有管道会让排空线程永久阻塞。taskkill /T 按 PID 连整棵树一起终止。
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
     try:
         process.kill()
     except OSError:

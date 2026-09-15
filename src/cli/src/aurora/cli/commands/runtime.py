@@ -11,14 +11,23 @@ from aurora.agent.transport import RuntimeApi, serve_ndjson, serve_websocket
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     """注册 runtime 子命令。"""
-    parser = subparsers.add_parser("runtime", help="启动 stdio NDJSON 前端运行时")
-    parser.add_argument("--host", default="127.0.0.1", help="WebSocket 监听地址")
-    parser.add_argument("--port", type=int, default=None, help="启用浏览器开发用 WebSocket 服务")
+    parser = subparsers.add_parser(
+        "runtime",
+        help="启动运行时：默认用 stdin/stdout 交换 NDJSON，指定端口则改用 WebSocket",
+    )
+    transport = parser.add_mutually_exclusive_group()
+    transport.add_argument(
+        "--stdio",
+        action="store_true",
+        help="用标准输入输出交换逐行 JSON（默认行为，显式传入便于外部包装器调用）",
+    )
+    transport.add_argument("--host", default="127.0.0.1", help="WebSocket 监听地址")
+    transport.add_argument("--port", type=int, default=None, help="启用浏览器开发用 WebSocket 服务")
     parser.set_defaults(handler=_run)
 
 
 def _run(args: argparse.Namespace) -> int:
-    """在标准输入输出上运行协议循环。"""
+    """在标准输入输出或 WebSocket 上运行协议循环。"""
     api = RuntimeApi()
     try:
         if args.port is None:

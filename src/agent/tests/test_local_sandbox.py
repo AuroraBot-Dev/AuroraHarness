@@ -14,6 +14,7 @@ from aurora.agent.sandbox import (
     SandboxUnavailableError,
     create_sandbox,
 )
+from aurora.agent.sandbox.local import _escape_sbpl
 
 
 def test_unknown_mode_is_rejected():
@@ -84,7 +85,9 @@ def test_seatbelt_profile_denies_writes_and_allows_workspace(tmp_path):
     args = LocalSandboxExecutor._seatbelt_args(tmp_path, "workspace-write")
     profile = args[1]
     assert "(deny file-write*)" in profile
-    assert str(tmp_path) in profile
+    # profile 是 Seatbelt 字符串字面量，路径里的反斜杠已按 SBPL 转义。Windows 路径天然带
+    # 反斜杠，所以必须与转义后的形式比较，否则这个测试只在类 Unix 上成立。
+    assert _escape_sbpl(str(tmp_path.resolve())) in profile
 
 
 def test_output_limit_is_applied_while_process_runs(tmp_path):

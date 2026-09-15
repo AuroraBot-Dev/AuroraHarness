@@ -1,7 +1,9 @@
 name: Python
 
 # 只管 Python 的两层：src/agent（aurora-agent）与 src/cli（aurora-cli）。
-# 用 paths 过滤，避免前端或 Rust 的改动触发这一组检查。
+#
+# 三平台矩阵：这是个跨平台桌面应用，只有在 Windows / macOS 上也跑一遍，
+# 才不会出现「在写代码的那台机器上绿、在用户机器上红」的情况。
 on:
   push:
     paths:
@@ -25,9 +27,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
@@ -45,10 +49,21 @@ jobs:
       - run: >-
           uv run --frozen python -c
           "from aurora.agent.transport import serve_websocket; from aurora.cli.main import build_parser"
+
+      # 下面几步只在一个平台跑，避免同一件事重复六次。
+      - name: 安装 Chromium，真正执行浏览器预览测试
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run --frozen playwright install --with-deps chromium
+      - name: 浏览器预览测试
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run --frozen pytest src/agent/tests/test_preview.py -v
       - run: uv run --frozen pip-audit
+        if: matrix.os == 'ubuntu-latest'
+
       # gitleaks-action 对组织仓库要求付费 License，这里直接用 OSS 版 CLI；
-      # 版本写死以便复现（与本地跑的结果一致：全历史无告警）。
+      # 版本写死以便复现（本地已跑过全历史扫描，无告警）。
       - name: 密钥扫描（gitleaks）
+        if: matrix.os == 'ubuntu-latest'
         run: |
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
             | sudo tar -xz -C /usr/local/bin gitleaks

@@ -118,12 +118,27 @@ pyrightconfig.json Python 类型检查（只覆盖两层源码）
 lefthook.yml       唯一的 Git 钩子来源（git 根）
 ```
 
+## 平台差异（跨平台约定）
+
+这套代码要同时跑在 macOS / Windows / Linux 上，且历史上主要在 macOS 上开发。以下约定是
+踩过坑之后固定下来的，改动时请保持：
+
+| 事项 | 约定 |
+|---|---|
+| 命令串的执行者 | 沙箱执行器把命令串交给**平台解释器**：类 Unix 用 `/bin/sh -c`，Windows 用 `powershell -Command`。两者引号规则不同——POSIX 单引号在 PowerShell 下是非法表达式，带空格的程序路径还需要调用运算符 `&`。 |
+| 进程树回收 | 类 Unix 用 `killpg` 杀掉整个进程组；Windows 没有进程组信号，改为 `taskkill /F /T /PID`。只 `kill()` 直接子进程会留下孙子进程（命令解释器拉起的服务），它们持有管道会让排空线程永久阻塞。 |
+| 沙箱后端 | Linux：bubblewrap / Landlock；macOS：Seatbelt；Windows：受限令牌 + NTFS ACL + Job Object。各自按 `sys.platform` 分支，互不干扰。 |
+| Python 解释器位置 | Windows 的 `prefix` 根下就是 `python.exe`，类 Unix 在 `bin/` 下。打包 sidecar 时用 `sys.prefix` / `sysconfig` 询问解释器，不要靠目录层级猜。 |
+| 依赖注入位置 | 依赖必须落在解释器自身的 `site-packages`：`.pth` 只在自身的 site-packages 下执行（pywin32 的 DLL bootstrap 依赖它）。 |
+| 类型检查平台 | `pyrightconfig.json` 固定 `pythonPlatform: Linux`，与 CI 一致，避免在 Windows 本地因 `os.O_CLOEXEC` 这类 Unix 专有 API 误报。要查 Windows 语义可临时加 `--pythonplatform Windows`。 |
+| CI 覆盖 | Python 与 Rust 都跑 ubuntu / windows / macos 三平台矩阵。**改动平台相关代码后不要只看自己那台机器。** |
+
 ## 已知的偏离与待办
 
 诚实记录当前状态，避免把它们当成「已解决」：
 
-- `AURORA_SIDECAR` 分支会给可执行文件传 `--stdio`，但 `aurora runtime` 并不接受该参数。
-  这是拆分前就存在的问题，本次迁移未改动行为，需要单独确认 sidecar 入口约定。
 - 协议版本号仍是三处手写常量，尚未做生成或校验（见 `docs/adr/001-protocol-version.md`）。
 - `docs/notes/` 下的两份文档记录了合并前两个仓库的工程化过程，其中的目录约定与命令已经
   过时，保留作为历史参考。
+- 前端 `playwright` E2E 只在 ubuntu 上跑；Windows / macOS 的桌面壳只做 `cargo check`，
+  真正的安装包构建在 tag 触发的 release 流水线里做。

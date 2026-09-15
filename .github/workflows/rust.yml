@@ -1,7 +1,9 @@
 name: Rust
 
-# 覆盖 Rust 的两个层次。crates 作业不需要任何桌面系统库，因此单独成一个作业：
-# 它跑得快，也顺带证明「broker 与桌面壳解耦」这条分层约束没有被破坏。
+# 两个作业都跑三平台：这是跨平台桌面应用，Windows / macOS 上的编译失败必须在 PR 阶段暴露。
+#
+# crates 作业不需要任何桌面系统库，也不需要额外安装步骤——这正是把 keyring 等平台集成
+# 从纯 Rust 层移走换来的。它跑得快，也顺带证明「代理与桌面壳解耦」这条分层约束没被破坏。
 on:
   push:
     paths:
@@ -29,7 +31,11 @@ env:
 jobs:
   crates:
     name: 纯 Rust 层
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -37,21 +43,29 @@ jobs:
       # 分层守卫：代理层必须与桌面壳、平台集成库解耦，否则 Linux 上就要装 dbus 等系统库，
       # 「可脱离桌面壳单独编译与测试」也就不成立了。
       - name: 断言代理层不含桌面壳与平台集成依赖
+        shell: bash
         run: |
           tree="$(cargo tree -p aurora-runtime-broker --prefix none)"
-          if grep -qiE '\b(tauri(-[a-z]+)*|keyring|dbus|secret-service) v' <<<"$tree"; then
+          if grep -qiE '\b(tauri(-[a-z]+)?|keyring|dbus|secret-service) v' <<<"$tree"; then
             echo "::error::aurora-runtime-broker 不得依赖桌面壳或平台集成库"
-            grep -iE '\b(tauri(-[a-z]+)*|keyring|dbus|secret-service) v' <<<"$tree"
+            grep -iE '\b(tauri(-[a-z]+)?|keyring|dbus|secret-service) v' <<<"$tree"
             exit 1
           fi
 
+  # 桌面壳：平台集成（钥匙串、窗口、打包）都在这里，三平台都要能编译。
+  # 只有 Linux 需要额外系统库。
   shell:
     name: Tauri 壳
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: 安装 Tauri 的 Linux 系统依赖
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \

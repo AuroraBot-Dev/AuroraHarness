@@ -6,6 +6,7 @@ agent 层不得依赖 cli 层，反向依赖只允许出现在本层测试中。
 
 from __future__ import annotations
 
+import pytest
 from rich.console import Console
 
 from aurora.agent.conversation import SessionReply
@@ -24,6 +25,17 @@ def test_console_uses_agent_reply_label():
 def test_runtime_command_is_registered():
     args = build_parser().parse_args(["runtime"])
     assert args.command == "runtime"
+    assert args.port is None
+
+
+def test_runtime_accepts_stdio_flag_exclusively():
+    """--stdio 是 stdio 传输的显式写法，供外部包装器（如打包 sidecar）调用。"""
+    args = build_parser().parse_args(["runtime", "--stdio"])
+    assert args.stdio is True
+    assert args.port is None
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["runtime", "--stdio", "--port", "8765"])
 
 
 def test_serve_command_is_registered():

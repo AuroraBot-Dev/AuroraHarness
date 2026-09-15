@@ -59,5 +59,4 @@ build-desktop: build-sidecar
 
 clean:
 	@cargo clean
-	@rm -rf $(TAURI)/resources/sidecar
-	@rm -rf $(FRONTEND)/.output $(FRONTEND)/.nuxt
+	@node -e "for (const p of ['$(TAURI)/resources/sidecar','$(FRONTEND)/.output','$(FRONTEND)/.nuxt']){require('node:fs').rmSync(p,{recursive:true,force:true})}"

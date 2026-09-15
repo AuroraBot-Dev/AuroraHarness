@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -34,7 +34,22 @@ export default function devBackend(_inlineOptions: unknown, nuxt: NuxtLike) {
     const running = backendState.child
     backendState.child = null
     if (!running || running.killed) return
-    if (process.platform !== 'win32' && running.pid) {
+    if (process.platform === 'win32') {
+      // Windows 没有进程组信号：只 kill 直接子进程会留下 uv 拉起的 Python（继续占着 8765，
+      // 下次启动就报端口冲突），因此按 PID 连整棵树一起终止。
+      if (running.pid) {
+        try {
+          spawnSync('taskkill', ['/F', '/T', '/PID', String(running.pid)], { stdio: 'ignore' })
+          return
+        }
+        catch {
+          // 落到下面的单进程终止
+        }
+      }
+      running.kill('SIGTERM')
+      return
+    }
+    if (running.pid) {
       try {
         process.kill(-running.pid, 'SIGTERM')
         return

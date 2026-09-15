@@ -69,8 +69,14 @@ cd src/frontend
 pnpm lint && pnpm typecheck && pnpm test
 ```
 
+## 三类质量门禁的覆盖范围
+
 CI 分三条流水线（`.github/workflows/python.yml`、`rust.yml`、`frontend.yml`），都带 `paths`
-过滤，只在你改动的层被触发。
+过滤，只在你改动的层被触发。Python 与 Rust 跑 **ubuntu / windows / macos 三平台矩阵**——
+这是跨平台桌面应用，只在写代码的那台机器上绿不算绿。
+
+平台相关的既有约定（命令串解释器、进程树回收、沙箱后端、sidecar 依赖落点）集中在
+[`docs/architecture.md`](docs/architecture.md) 的「平台差异」一节，改动前先读。
 
 ## 分层约定（重要）
 

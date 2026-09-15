@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -12,6 +14,19 @@ import pytest
 
 from aurora.agent.preview import BrowserCapture, validate_preview
 from aurora.agent.sandbox import Sandbox, UnsafeSubprocessExecutor
+
+
+def _command(*parts: str) -> str:
+    """把命令拼成当前平台命令解释器能执行的字符串。
+
+    预览配置里的 command 是一整条命令串，执行器把原样交给平台的解释器：类 Unix 上是
+    ``/bin/sh -c``，Windows 上是 ``powershell -Command``。两者引号规则不同，Windows 上
+    既不能沿用 shlex.quote 的单引号（PowerShell 会当成表达式报错），带空格的程序路径还
+    必须配合调用运算符 ``&``，所以这里按平台分别拼装。
+    """
+    if os.name == "nt":
+        return "& " + subprocess.list2cmdline(list(parts))
+    return shlex.join(parts)
 
 
 def test_preview_rejects_external_urls_and_path_escape(tmp_path):
@@ -34,7 +49,10 @@ def test_preview_command_cancellation_stops_before_timeout(tmp_path):
     timer.start()
     try:
         result = sandbox.run_in(
-            ".", f'{shlex.quote(sys.executable)} -c "import time; time.sleep(30)"', 30, cancelled
+            ".",
+            _command(sys.executable, "-c", "import time; time.sleep(30)"),
+            30,
+            cancelled,
         )
         assert time.monotonic() - started < 5
         assert result.exit_code != 0
@@ -51,7 +69,7 @@ def test_real_browser_capture_and_preview_cleanup(tmp_path):
     (tmp_path / "index.html").write_text("<!doctype html><h1>Aurora preview</h1>", encoding="utf-8")
     config = {
         "url": f"http://127.0.0.1:{port}",
-        "command": f"{shlex.quote(sys.executable)} -m http.server {port} --bind 127.0.0.1",
+        "command": _command(sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"),
     }
     try:
         screenshots, log = BrowserCapture().capture(
