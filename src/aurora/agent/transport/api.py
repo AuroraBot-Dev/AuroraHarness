@@ -354,25 +354,36 @@ class RuntimeApi:
 
 
 def serve_ndjson(api: RuntimeApi, input_stream: TextIO, output_stream: TextIO) -> None:
-    """持续读取 NDJSON 请求并写出协议帧。"""
-    for line in input_stream:
-        if not line.strip():
-            continue
-        try:
-            request = json.loads(line)
-            if not isinstance(request, Mapping):
-                raise ValueError("请求必须是 JSON 对象")
-            if "request_id" in request or "protocol_version" in request:
-                api.process_wire(
-                    request,
-                    lambda frame: _write_frame(output_stream, frame),
-                )
-                continue
-            frames = api.handle(request)
-        except (json.JSONDecodeError, ValueError) as exc:
-            frames = [_error(None, "invalid_json", str(exc))]
-        for frame in frames:
+    """并行处理耗时运行，保持状态查询与配置请求可响应。"""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    lock = threading.Lock()
+
+    def emit(frame):
+        """原子写出一个协议帧。"""
+        with lock:
             _write_frame(output_stream, frame)
+
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        for line in input_stream:
+            if not line.strip():
+                continue
+            try:
+                request = json.loads(line)
+                if not isinstance(request, Mapping):
+                    raise ValueError("请求必须是 JSON 对象")
+                if "request_id" in request or "protocol_version" in request:
+                    if request.get("method") in {"run.start", "run.resume", "agent.test"}:
+                        workers.submit(api.process_wire, request, emit)
+                    else:
+                        api.process_wire(request, emit)
+                    continue
+                frames = api.handle(request)
+            except (json.JSONDecodeError, ValueError) as exc:
+                frames = [_error(None, "invalid_json", str(exc))]
+            for frame in frames:
+                emit(frame)
 
 
 def _frames_for_update(update: RunUpdate) -> tuple[dict[str, Any], list[dict[str, Any]]]:

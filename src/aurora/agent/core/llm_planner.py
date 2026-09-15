@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field, field_validator
 
@@ -112,6 +112,12 @@ class LLMPlanner:
         """将角色职责加入规划器系统消息。"""
         self._prompt = ChatPromptTemplate.from_messages(
             [("system", PLANNER_SYSTEM), SystemMessage(content=instructions), ("human", "{goal}")]
+        )
+
+    def set_images(self, images: list[str | dict]) -> None:
+        """把真实图片作为消息加入子任务规划上下文。"""
+        self._prompt = ChatPromptTemplate.from_messages(
+            [*self._prompt.messages, HumanMessage(content=images)]
         )
 
     def plan(self, goal: str) -> list[Task]:

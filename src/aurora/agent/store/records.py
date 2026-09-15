@@ -11,13 +11,34 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import delete, func, select
+from sqlalchemy import update as orm_update
+
 from .database import Database, dumps, now, uid
+from .model import (
+    MODELS,
+    Agent,
+    AgentRun,
+    Artifact,
+    ConversationSession,
+    Interaction,
+    Message,
+    ModelConfig,
+    ModelProvider,
+    Project,
+    Run,
+    RunEvent,
+    Setting,
+    Task,
+    Workflow,
+    WorkflowStep,
+)
 
 TABLES = {
-    "project": ("projects", {"name", "path", "preview_json"}),
-    "provider": ("model_providers", {"name", "adapter", "base_url", "credential_ref", "enabled"}),
+    "project": (Project, {"name", "path", "preview_json"}),
+    "provider": (ModelProvider, {"name", "adapter", "base_url", "credential_ref", "enabled"}),
     "model": (
-        "model_configs",
+        ModelConfig,
         {
             "provider_id",
             "name",
@@ -25,14 +46,23 @@ TABLES = {
             "parameters_json",
             "context_budget_tokens",
             "input_types_json",
+            "model_type",
             "enabled",
         },
     ),
     "agent": (
-        "agents",
-        {"name", "instructions", "model_config_id", "allowed_tools_json", "enabled"},
+        Agent,
+        {
+            "name",
+            "description",
+            "callable",
+            "instructions",
+            "model_config_id",
+            "allowed_tools_json",
+            "enabled",
+        },
     ),
-    "workflow": ("workflows", {"name", "kind", "max_revisions", "enabled"}),
+    "workflow": (Workflow, {"name", "kind", "max_revisions", "enabled"}),
 }
 
 
@@ -85,43 +115,48 @@ class Records:
         self.artifact_root.mkdir(parents=True, exist_ok=True)
 
     def insert(self, table, **values):
-        """写入由内部代码指定的业务记录。"""
-        with self.db.transaction() as connection:
-            connection.execute(
-                f"INSERT INTO {table} ({','.join(values)}) VALUES "
-                f"({','.join('?' for _ in values)})",
-                tuple(values.values()),
-            )
-        return values
+        """将实体加入当前工作单元并立即校验约束。"""
+        model = MODELS[table] if isinstance(table, str) else table
+        with self.db.transaction() as session:
+            entity = model(**values)
+            session.add(entity)
+            session.flush()
+            return entity.to_record()
 
     def update(self, table, record_id, **values):
-        """更新由内部代码指定的业务记录。"""
-        with self.db.transaction() as connection:
-            connection.execute(
-                f"UPDATE {table} SET {','.join(key + '=?' for key in values)} WHERE id=?",
-                (*values.values(), record_id),
-            )
+        """加载实体并由 Session 跟踪字段变更。"""
+        model = MODELS[table] if isinstance(table, str) else table
+        with self.db.transaction() as session:
+            entity = session.get(model, record_id)
+            if entity is None:
+                raise ValueError("记录不存在")
+            columns = model.__table__.columns
+            for key, value in values.items():
+                if key not in columns:
+                    raise ValueError("未知实体字段")
+                setattr(entity, key, value)
+            session.flush()
 
     def get(self, table, record_id) -> dict[str, Any]:
-        """按内部表名读取必需记录。"""
-        row = self.db.one(f"SELECT * FROM {table} WHERE id=?", (record_id,))
-        if row is None:
-            raise ValueError("记录不存在")
-        return decode(row)
+        """读取实体并映射到业务响应。"""
+        model = MODELS[table] if isinstance(table, str) else table
+        with self.db.transaction() as session:
+            entity = session.get(model, record_id)
+            if entity is None:
+                raise ValueError("记录不存在")
+            return decode(entity.to_record())
 
     def setting(self, key, default=None):
-        """读取设置。"""
-        row = self.db.one("SELECT value_json FROM settings WHERE key=?", (key,))
-        return json.loads(row["value_json"]) if row else default
+        """读取设置实体。"""
+        with self.db.transaction() as session:
+            entity = session.get(Setting, key)
+            return json.loads(entity.value_json) if entity else default
 
     def set_setting(self, key, value):
-        """保存设置。"""
-        with self.db.transaction() as connection:
-            connection.execute(
-                "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE "
-                "SET value_json=excluded.value_json",
-                (key, dumps(value)),
-            )
+        """保存设置实体。"""
+        with self.db.transaction() as session:
+            session.merge(Setting(key=key, value_json=dumps(value)))
+            session.flush()
 
     def acquire_runtime(self):
         """在恢复运行之前取得独占运行权。"""
@@ -132,7 +167,7 @@ class Records:
     def bootstrap(self):
         """仅在配置为空时导入环境默认值。"""
         with self.db.transaction():
-            if self.db.one("SELECT id FROM model_providers LIMIT 1"):
+            if self.db.first(select(ModelProvider.id).limit(1)):
                 return
             provider = self.save(
                 "provider",
@@ -163,31 +198,35 @@ class Records:
         stamp = now()
         with self.db.transaction() as connection:
             connection.execute(
-                "UPDATE agent_runs SET status='interrupted', updated_at=? "
-                "WHERE status IN ('queued','running','waiting')",
-                (stamp,),
+                orm_update(AgentRun)
+                .where(AgentRun.status.in_(("queued", "running", "waiting")))
+                .values(status="interrupted", updated_at=stamp)
             )
             connection.execute(
-                "UPDATE tasks SET status='interrupted', updated_at=? "
-                "WHERE status IN ('queued','running','waiting')",
-                (stamp,),
+                orm_update(Task)
+                .where(Task.status.in_(("queued", "running", "waiting")))
+                .values(status="interrupted", updated_at=stamp)
             )
             connection.execute(
-                "UPDATE interactions SET status='expired', updated_at=? WHERE status='pending'",
-                (stamp,),
+                orm_update(Interaction)
+                .where(Interaction.status == "pending")
+                .values(status="expired", updated_at=stamp)
             )
-            connection.execute("UPDATE messages SET status='failed' WHERE status='streaming'")
             connection.execute(
-                "UPDATE runs SET status='interrupted', error='运行时已重启', "
-                "updated_at=?, ended_at=? WHERE status IN "
-                "('queued','running','waiting')",
-                (stamp, stamp),
+                orm_update(Message).where(Message.status == "streaming").values(status="failed")
+            )
+            connection.execute(
+                orm_update(Run)
+                .where(Run.status.in_(("queued", "running", "waiting")))
+                .values(
+                    status="interrupted", error="运行时已重启", updated_at=stamp, ended_at=stamp
+                )
             )
 
     def list_configs(self, kind):
         """列出配置及流程阶段。"""
         table = TABLES[kind][0]
-        records = [decode(row) for row in self.db.all(f"SELECT * FROM {table} ORDER BY created_at")]
+        records = [decode(row) for row in self.db.rows(select(table).order_by(table.created_at))]
         if kind == "workflow":
             for row in records:
                 row["steps"] = self.steps(row["id"])
@@ -195,8 +234,10 @@ class Records:
 
     def steps(self, workflow_id):
         """读取预设流程的阶段绑定。"""
-        return self.db.all(
-            "SELECT * FROM workflow_steps WHERE workflow_id=? ORDER BY position", (workflow_id,)
+        return self.db.rows(
+            select(WorkflowStep)
+            .where(WorkflowStep.workflow_id == workflow_id)
+            .order_by(WorkflowStep.position)
         )
 
     def save(self, kind, data, record_id=None):
@@ -252,6 +293,28 @@ class Records:
             }:
                 raise ValueError("不支持的模型参数")
             types = merged.get("input_types", ["text"])
+            if (
+                not isinstance(types, list)
+                or any(not isinstance(item, str) for item in types)
+                or "text" not in types
+                or set(types) - {"text", "image"}
+            ):
+                raise ValueError("模型输入类型必须包含 text，可选 image")
+            model_type = data.get(
+                "model_type", old.get("model_type", "multimodal" if "image" in types else "text")
+            )
+            if "input_types" in data and "model_type" not in data and model_type != "embedding":
+                model_type = "multimodal" if "image" in types else "text"
+            if not isinstance(model_type, str) or model_type not in {
+                "text",
+                "multimodal",
+                "embedding",
+            }:
+                raise ValueError("模型类型无效")
+            values["model_type"] = model_type
+            if "model_type" in data:
+                types = ["text", "image"] if model_type == "multimodal" else ["text"]
+                values["input_types_json"] = dumps(types)
             if not isinstance(types, list) or "text" not in types or set(types) - {"text", "image"}:
                 raise ValueError("模型输入类型必须包含 text，可选 image")
             if (
@@ -260,6 +323,12 @@ class Records:
             ):
                 raise ValueError("上下文预算必须为正整数")
         if kind == "agent":
+            if any(
+                not isinstance(merged.get(key, ""), str) for key in ("description", "instructions")
+            ):
+                raise ValueError("能力描述和 Prompt 必须是文本")
+            if merged.get("callable", False) not in (True, False, 0, 1):
+                raise ValueError("开放调用必须是布尔值")
             tools = merged.get("allowed_tools", ["*"])
             if not isinstance(tools, list) or any(not isinstance(item, str) for item in tools):
                 raise ValueError("工具权限必须是名称列表")
@@ -287,17 +356,23 @@ class Records:
                 workflow_kind = merged["kind"]
                 if not code or (workflow_kind == "frontend-review" and not review):
                     raise ValueError("流程缺少编写或审查 Agent")
-                self.db.connection.execute(
-                    "DELETE FROM workflow_steps WHERE workflow_id=?", (record_id,)
-                )
+                self.db.execute(delete(WorkflowStep).where(WorkflowStep.workflow_id == record_id))
                 definitions = (
                     [("code", code)]
                     if workflow_kind == "single"
                     else [("code", code), ("capture", None), ("review", review), ("summary", code)]
                 )
+                for _, agent_id in definitions:
+                    if agent_id:
+                        selected_agent = self.get(Agent, agent_id)
+                        if (
+                            self.get(ModelConfig, selected_agent["model_config_id"])["model_type"]
+                            == "embedding"
+                        ):
+                            raise ValueError("向量模型暂不支持工作流执行")
                 for position, (step, agent) in enumerate(definitions):
                     self.insert(
-                        "workflow_steps",
+                        WorkflowStep,
                         id=uid(),
                         workflow_id=record_id,
                         step_key=step,
@@ -313,7 +388,7 @@ class Records:
     def project(self, path):
         """按规范路径查找或创建项目。"""
         canonical = str(Path(path).expanduser().resolve())
-        row = self.db.one("SELECT * FROM projects WHERE path=?", (canonical,))
+        row = self.db.first(select(Project).where(Project.path == canonical))
         return (
             decode(row)
             if row
@@ -322,18 +397,20 @@ class Records:
 
     def snapshot(self, workflow_id, sandbox_mode, approval_mode):
         """解析并冻结一轮实际使用的流程、角色和模型。"""
-        workflow = self.get("workflows", workflow_id)
+        workflow = self.get(Workflow, workflow_id)
         if not workflow["enabled"]:
             raise ValueError("流程已停用")
         steps = self.steps(workflow_id)
         for step in steps:
             if not step["agent_id"]:
                 continue
-            agent = self.get("agents", step["agent_id"])
-            model = self.get("model_configs", agent["model_config_id"])
-            provider = self.get("model_providers", model["provider_id"])
+            agent = self.get(Agent, step["agent_id"])
+            model = self.get(ModelConfig, agent["model_config_id"])
+            provider = self.get(ModelProvider, model["provider_id"])
             if not all(item["enabled"] for item in (agent, model, provider)):
                 raise ValueError("流程引用了已停用的 Agent、模型或供应商")
+            if model["model_type"] == "embedding":
+                raise ValueError("向量模型暂不支持工作流执行")
             step["config"] = {"agent": agent, "model": model, "provider": provider}
         return {
             "workflow": workflow,
@@ -357,12 +434,13 @@ class Records:
     ):
         """事务内分配消息序号并保存消息。"""
         with self.db.transaction():
-            seq = self.db.all(
-                "SELECT COALESCE(MAX(seq),0)+1 AS seq FROM messages WHERE session_id=?",
-                (session_id,),
+            seq = self.db.rows(
+                select((func.coalesce(func.max(Message.seq), 0) + 1).label("seq")).where(
+                    Message.session_id == session_id
+                )
             )[0]["seq"]
             return self.insert(
-                "messages",
+                Message,
                 id=uid(),
                 session_id=session_id,
                 run_id=run_id,
@@ -381,11 +459,16 @@ class Records:
         """按完整公共轮次选取历史，保守估算 token 避免丢失本轮要求。"""
         if len(current.encode("utf-8")) > budget:
             raise ValueError("当前需求和交接材料超过上下文预算，请缩小任务或提高预算")
-        session = self.get("sessions", session_id)
-        rows = self.db.all(
-            "SELECT * FROM messages WHERE session_id=? AND seq>? "
-            "AND visibility='public' AND status='completed' ORDER BY seq",
-            (session_id, session["context_start_seq"]),
+        session = self.get(ConversationSession, session_id)
+        rows = self.db.rows(
+            select(Message)
+            .where(
+                Message.session_id == session_id,
+                Message.seq > session["context_start_seq"],
+                Message.visibility == "public",
+                Message.status == "completed",
+            )
+            .order_by(Message.seq)
         )
         groups = []
         for row in rows:
@@ -408,28 +491,33 @@ class Records:
         """推进上下文边界并保留原始历史。"""
         with self.db.transaction():
             self.require_idle(session_id)
-            seq = self.db.all(
-                "SELECT COALESCE(MAX(seq),0) AS seq FROM messages WHERE session_id=?", (session_id,)
+            seq = self.db.rows(
+                select(func.coalesce(func.max(Message.seq), 0).label("seq")).where(
+                    Message.session_id == session_id
+                )
             )[0]["seq"]
-            self.update("sessions", session_id, context_start_seq=seq, updated_at=now())
+            self.update(ConversationSession, session_id, context_start_seq=seq, updated_at=now())
 
     def require_idle(self, session_id):
         """拒绝修改正在运行的会话。"""
-        self.get("sessions", session_id)
-        if self.db.one(
-            "SELECT id FROM runs WHERE session_id=? AND status IN ('queued','running','waiting')",
-            (session_id,),
+        self.get(ConversationSession, session_id)
+        if self.db.first(
+            select(Run.id).where(
+                Run.session_id == session_id, Run.status.in_(("queued", "running", "waiting"))
+            )
         ):
             raise ValueError("会话已有活动运行")
 
     def event(self, run_id, event_type, payload):
         """分配执行事件顺序并持久化。"""
         with self.db.transaction():
-            seq = self.db.all(
-                "SELECT COALESCE(MAX(seq),0)+1 AS seq FROM run_events WHERE run_id=?", (run_id,)
+            seq = self.db.rows(
+                select((func.coalesce(func.max(RunEvent.seq), 0) + 1).label("seq")).where(
+                    RunEvent.run_id == run_id
+                )
             )[0]["seq"]
             return self.insert(
-                "run_events",
+                RunEvent,
                 id=uid(),
                 run_id=run_id,
                 seq=seq,
@@ -449,7 +537,7 @@ class Records:
         temporary.replace(path)
         try:
             return self.insert(
-                "artifacts",
+                Artifact,
                 id=artifact_id,
                 run_id=run_id,
                 agent_run_id=agent_run_id,
@@ -467,7 +555,7 @@ class Records:
 
     def artifact_bytes(self, artifact_id):
         """读取并验证受管理产物文件。"""
-        row = self.get("artifacts", artifact_id)
+        row = self.get(Artifact, artifact_id)
         path = Path(row["path"]).resolve()
         if not path.is_relative_to(self.artifact_root.resolve()):
             raise ValueError("产物路径无效")
@@ -480,12 +568,14 @@ class Records:
         """提交会话删除后清理所属产物。"""
         with self.db.transaction() as connection:
             self.require_idle(session_id)
-            paths = self.db.all(
-                "SELECT path FROM artifacts WHERE run_id IN "
-                "(SELECT id FROM runs WHERE session_id=?)",
-                (session_id,),
+            paths = self.db.rows(
+                select(Artifact.path).where(
+                    Artifact.run_id.in_(select(Run.id).where(Run.session_id == session_id))
+                )
             )
-            connection.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            connection.execute(
+                delete(ConversationSession).where(ConversationSession.id == session_id)
+            )
         for item in paths:
             path = Path(item["path"]).resolve()
             if path.is_relative_to(self.artifact_root.resolve()):

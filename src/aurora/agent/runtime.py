@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from langgraph.types import Command
 
+from aurora.agent.store.model import ConversationSession, Project
 from aurora.text import sanitize_text, sanitize_value
 
 from .core import LLMClarifier, LLMPlanner
@@ -319,7 +320,7 @@ class AgentRuntime:
         workspace = validate_workspace(workspace_path)
         project = self.records.project(workspace.path)
         record = self.records.insert(
-            "sessions",
+            ConversationSession,
             id=uid(),
             project_id=project["id"],
             workflow_id=workflow_id or self.records.setting("default_workflow_id"),
@@ -339,8 +340,8 @@ class AgentRuntime:
             if session_id not in self._sessions:
                 from .workflows import WorkflowSession
 
-                record = self.records.get("sessions", session_id)
-                project = self.records.get("projects", record["project_id"])
+                record = self.records.get(ConversationSession, session_id)
+                project = self.records.get(Project, record["project_id"])
                 workspace = validate_workspace(project["path"])
                 repository = GitRepository.ensure(workspace.path)
                 self._sessions[session_id] = WorkflowSession(self, record, workspace, repository)
@@ -349,7 +350,7 @@ class AgentRuntime:
     def close_session(self, session_id: str) -> None:
         """释放会话资源并保留历史。"""
         with self._session_lock:
-            self.records.get("sessions", session_id)
+            self.records.get(ConversationSession, session_id)
             session = self._sessions.get(session_id)
             if session:
                 session.close()

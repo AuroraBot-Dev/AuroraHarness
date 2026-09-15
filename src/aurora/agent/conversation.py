@@ -7,10 +7,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from sqlalchemy import func, select
 
+from aurora.agent.store.model import ConversationSession as SessionEntity
 from aurora.text import sanitize_text
 
 from .core import Planner, Task, TraceEvent
+from .store.model import Message
 
 SYSTEM_PROMPT = """你是 Aurora，一个运行在用户本机的项目级 AI Agent。
 用清晰、直接的语言回答用户；不知道的信息明确说明，不虚构已经执行的操作。
@@ -59,12 +62,16 @@ class ConversationSession:
     def history_size(self) -> int:
         """返回已保存的对话消息数。"""
         if self._persistent_session:
-            record = self._persistent_session.records.get("sessions", self._persistent_session.id)
-            return self._persistent_session.records.db.one(
-                "SELECT COUNT(*) AS n FROM messages WHERE session_id=? AND seq>? "
-                "AND visibility='public'",
-                (record["id"], record["context_start_seq"]),
-            )["n"]
+            record = self._persistent_session.records.get(
+                SessionEntity, self._persistent_session.id
+            )
+            return self._persistent_session.records.db.rows(
+                select(func.count(Message.id).label("n")).where(
+                    Message.session_id == record["id"],
+                    Message.seq > record["context_start_seq"],
+                    Message.visibility == "public",
+                )
+            )[0]["n"]
         return len(self._history)
 
     def handle(self, line: str) -> SessionReply:

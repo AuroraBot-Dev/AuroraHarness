@@ -8,6 +8,7 @@ import sqlite3
 
 import pytest
 from langchain_core.messages import AIMessage
+from sqlalchemy.exc import IntegrityError
 
 from aurora.agent.core import Effort, NoClarifier
 from aurora.agent.runtime import AgentRuntime
@@ -253,10 +254,10 @@ def test_sqlite_migrations_foreign_keys_and_pagination(tmp_path):
     runtime, workspace, _, _ = runtime_at(tmp_path)
     store = runtime.records
     store.db.migrate()
-    assert store.db.one("SELECT COUNT(*) AS n FROM schema_migrations")["n"] == 1
+    assert store.db.one("SELECT COUNT(*) AS n FROM schema_migrations")["n"] == 2
     assert store.db.one("PRAGMA foreign_keys")["foreign_keys"] == 1
     assert store.db.one("PRAGMA journal_mode")["journal_mode"] == "wal"
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(IntegrityError):
         store.save("agent", {"name": "broken", "model_config_id": "missing"})
     session = runtime.create_session(str(workspace))
     for index in range(55):
@@ -326,7 +327,7 @@ def test_persistence_protocol_roundtrip_and_deletion(tmp_path):
 
 def test_failed_migration_rolls_back_ddl_and_version(tmp_path, monkeypatch):
     db = Database(tmp_path / "migration.db")
-    migration = tmp_path / "002_broken.sql"
+    migration = tmp_path / "003_broken.sql"
     migration.write_text("CREATE TABLE partial(id TEXT); INSERT INTO nonexistent VALUES (1);")
     original_glob = __import__("pathlib").Path.glob
     monkeypatch.setattr(
@@ -338,7 +339,7 @@ def test_failed_migration_rolls_back_ddl_and_version(tmp_path, monkeypatch):
     with pytest.raises(sqlite3.OperationalError):
         db.migrate()
     assert db.one("SELECT name FROM sqlite_master WHERE name='partial'") is None
-    assert db.one("SELECT version FROM schema_migrations WHERE version=2") is None
+    assert db.one("SELECT version FROM schema_migrations WHERE version=3") is None
     db.close()
 
 

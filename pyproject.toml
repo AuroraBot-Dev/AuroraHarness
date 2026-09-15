@@ -16,6 +16,7 @@ dependencies = [
     "pywin32>=311 ; sys_platform == 'win32'",
     "pyyaml>=6.0,<7",
     "rich>=15.0.0",
+    "sqlalchemy>=2.0,<3",
     "websockets>=16,<17",
 ]
 

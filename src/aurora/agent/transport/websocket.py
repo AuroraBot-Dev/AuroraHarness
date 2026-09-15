@@ -21,6 +21,35 @@ async def serve_websocket(api: RuntimeApi, host: str = "127.0.0.1", port: int = 
 
     async def handler(websocket: ServerConnection) -> None:
         logger.info("WebSocket 客户端已连接: %s", websocket.remote_address)
+        workers = set()
+        slots = asyncio.Semaphore(4)
+
+        async def process_request(value):
+            """桥接单个请求的响应和进度。"""
+            queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def emit(frame):
+                loop.call_soon_threadsafe(queue.put_nowait, frame)
+
+            def process():
+                try:
+                    api.process_wire(value, emit)
+                finally:
+                    emit(None)
+
+            worker = asyncio.create_task(asyncio.to_thread(process))
+            try:
+                while (frame := await queue.get()) is not None:
+                    await websocket.send(json.dumps(sanitize_value(frame), ensure_ascii=False))
+            finally:
+                await worker
+
+        async def run_request(value):
+            """限制同时执行的长请求数量。"""
+            async with slots:
+                await process_request(value)
+
         try:
             async for raw in websocket:
                 if not isinstance(raw, str) or not raw.strip():
@@ -50,26 +79,12 @@ async def serve_websocket(api: RuntimeApi, host: str = "127.0.0.1", port: int = 
                     continue
 
                 if "request_id" in request or "protocol_version" in request:
-                    queue = asyncio.Queue()
-                    loop = asyncio.get_running_loop()
-
-                    def emit(frame):
-                        loop.call_soon_threadsafe(queue.put_nowait, frame)
-
-                    def process():
-                        try:
-                            api.process_wire(request, emit)
-                        finally:
-                            emit(None)
-
-                    worker = asyncio.create_task(asyncio.to_thread(process))
-                    try:
-                        while (frame := await queue.get()) is not None:
-                            await websocket.send(
-                                json.dumps(sanitize_value(frame), ensure_ascii=False)
-                            )
-                    finally:
-                        await worker
+                    if request.get("method") in {"run.start", "run.resume", "agent.test"}:
+                        worker = asyncio.create_task(run_request(request))
+                        workers.add(worker)
+                        worker.add_done_callback(workers.discard)
+                    else:
+                        await process_request(request)
                 else:
                     frames = api.handle(request)
                     for frame in frames:
@@ -81,6 +96,8 @@ async def serve_websocket(api: RuntimeApi, host: str = "127.0.0.1", port: int = 
         except Exception:
             logger.debug("WebSocket 客户端断开", exc_info=True)
         finally:
+            if workers:
+                await asyncio.gather(*workers, return_exceptions=True)
             logger.info("WebSocket 客户端已断开: %s", websocket.remote_address)
 
     async with serve(handler, host, port) as server:

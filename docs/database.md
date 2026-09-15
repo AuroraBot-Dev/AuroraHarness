@@ -82,3 +82,21 @@ uv run pytest
 ```
 
 `tests/test_persistence.py` 使用真实临时 SQLite 验证迁移、重启、历史隔离、分页、去重、配置快照和返修循环。`tests/test_preview.py` 验证 URL／路径边界、进程取消和真实 Chromium 双视口截图；没有安装 Chromium 时仅真实浏览器测试跳过。协作模型测试使用可控模型响应，不调用收费模型服务。
+
+## ORM 实体与工作单元
+
+所有业务数据库操作使用 SQLAlchemy 2 ORM，实体集中在 `src/aurora/agent/store/model/`。数据库仍是 SQLite，现有迁移及数据无需转换。依赖通过 `uv sync` 安装。
+
+```python
+from sqlalchemy import select
+from aurora.agent.store.model import Agent
+
+with database.transaction() as session:
+    agent = session.scalars(select(Agent).where(Agent.name == "前端编写")).first()
+    if agent is not None:
+        agent.instructions = "根据需求编写页面并处理视觉审查问题"
+```
+
+事务内的属性修改由 Session 自动提交；异常时回滚。嵌套调用共享同一工作单元，模型或工具调用期间不得持有事务。实体外键关联可在 Session 内访问，例如 `agent.model_config.provider`。JSON 列维持现有文本存储格式，协议边界继续展开为对象，旧快照和历史可直接读取。
+
+新增实体或字段时同时添加版本化 SQL 迁移并更新 ORM 模型。测试覆盖旧数据库读写、关系映射、约束一致性、回滚与并发消息序号。

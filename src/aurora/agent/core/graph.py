@@ -30,6 +30,8 @@ def build_delegation_graph(
     interrupt_after: Sequence[str] | None = None,
     collect_feedback: bool = False,
     feedback_sink: Callable[[DelegationState], None] | None = None,
+    delegate: Callable | None = None,
+    serial: bool = False,
 ):
     """构建并编译支持人工介入的委派图。"""
     if max_clarification_rounds < 0:
@@ -114,6 +116,8 @@ def build_delegation_graph(
         """按任务动态并行派发。"""
         if not state["tasks"]:
             return "summarize"
+        if serial:
+            return "execute"
         return [Send("execute", {"current_task": task}) for task in state["tasks"]]
 
     def dispatch_node(state: DelegationState) -> dict:
@@ -122,12 +126,18 @@ def build_delegation_graph(
 
     def execute_node(state: DelegationState) -> dict:
         """通过确认门执行一个叶子任务。"""
-        task = state.get("current_task")
+        task = (
+            state["tasks"][len(state.get("results", []))] if serial else state.get("current_task")
+        )
         if task is None:
             raise ValueError("当前任务不能为空")
         try:
             tool = tools[task["tool"]]
-            output = gate.invoke(tool, task["args"])
+            output = (
+                delegate(task)
+                if delegate and tool.name == "call_agent"
+                else gate.invoke(tool, task["args"])
+            )
             ok = True
             log.info("[%s] ✓ %s", task["effort"].value, task["description"])
         except GraphInterrupt:
@@ -210,7 +220,18 @@ def build_delegation_graph(
     builder.add_conditional_edges("clarify", route_after_clarify)
     builder.add_edge("ask_user", "plan")
     builder.add_conditional_edges("dispatch", dispatch)
-    builder.add_edge("execute", "summarize")
+    if serial:
+        builder.add_conditional_edges(
+            "execute",
+            lambda state: (
+                "execute"
+                if len(state.get("results", [])) < len(state["tasks"])
+                and all(result["ok"] for result in state.get("results", []))
+                else "summarize"
+            ),
+        )
+    else:
+        builder.add_edge("execute", "summarize")
     builder.add_edge("summarize", "feedback" if collect_feedback else END)
     if collect_feedback:
         builder.add_edge("feedback", END)

@@ -12,6 +12,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from pydantic import BaseModel, Field
+from sqlalchemy import delete, select
+from sqlalchemy import update as orm_update
+
+from aurora.agent.store.model import ConversationSession, Project, ReviewArtifact
 
 from .conversation import SYSTEM_PROMPT, _message_text
 from .core import build_delegation_graph
@@ -20,6 +24,14 @@ from .preview import validate_preview
 from .runtime import AgentSession, RuntimeInterrupt, RunUpdate
 from .safety import build_gate
 from .store.database import dumps, now, uid
+from .store.model import (
+    AgentRun,
+    Interaction,
+    Review,
+    ReviewFinding,
+    Run,
+    Task,
+)
 from .store.records import decode
 
 
@@ -71,13 +83,16 @@ class WorkflowSession(AgentSession):
 
     def _snapshot(self, workflow_id=None):
         """读取会话当前配置并冻结工作流。"""
-        self.record = self.records.get("sessions", self.id)
+        self.record = self.records.get(ConversationSession, self.id)
         result = self.records.snapshot(
             workflow_id or self.record["workflow_id"],
             self.record["sandbox_mode"],
             self.record["approval_mode"],
         )
-        result["preview"] = self.records.get("projects", self.record["project_id"])["preview"]
+        from .registry import AgentRegistry
+
+        result["agents"] = AgentRegistry(self.runtime).snapshot()
+        result["preview"] = self.records.get(Project, self.record["project_id"])["preview"]
         return result
 
     def _model(self, config):
@@ -109,8 +124,8 @@ class WorkflowSession(AgentSession):
         if not goal or mode not in {"run", "say", "plan"}:
             raise ValueError("目标不能为空且运行模式必须有效")
         key = request_key or uid()
-        existing = self.records.db.one(
-            "SELECT id FROM runs WHERE session_id=? AND request_key=?", (self.id, key)
+        existing = self.records.db.first(
+            select(Run.id).where(Run.session_id == self.id, Run.request_key == key)
         )
         if existing:
             return self._result(existing["id"])
@@ -118,8 +133,8 @@ class WorkflowSession(AgentSession):
             raise ValueError("会话正在处理请求")
         try:
             with self.records.db.transaction():
-                existing = self.records.db.one(
-                    "SELECT id FROM runs WHERE session_id=? AND request_key=?", (self.id, key)
+                existing = self.records.db.first(
+                    select(Run.id).where(Run.session_id == self.id, Run.request_key == key)
                 )
                 if existing:
                     return self._result(existing["id"])
@@ -131,7 +146,7 @@ class WorkflowSession(AgentSession):
                 )
                 run_id = uid()
                 self.records.insert(
-                    "runs",
+                    Run,
                     id=run_id,
                     session_id=self.id,
                     request_key=key,
@@ -143,7 +158,7 @@ class WorkflowSession(AgentSession):
                     updated_at=now(),
                 )
                 self.records.message(self.id, "user", goal, run_id=run_id)
-                self.records.update("sessions", self.id, updated_at=now())
+                self.records.update(ConversationSession, self.id, updated_at=now())
             self._run_ids.add(run_id)
             state = {
                 "snapshot": snapshot,
@@ -166,14 +181,16 @@ class WorkflowSession(AgentSession):
         if not self._lock.acquire(blocking=False):
             raise ValueError("会话正在处理请求")
         try:
-            run = self.records.get("runs", run_id)
+            run = self.records.get(Run, run_id)
             if run["session_id"] != self.id:
                 raise ValueError("运行不属于当前会话")
             if run["status"] != "waiting" or run_id not in self._active:
                 raise ValueError("运行已结束或中断，不能恢复旧审批")
             state = self._active[run_id]
-            pending = self.records.db.all(
-                "SELECT * FROM interactions WHERE run_id=? AND status='pending'", (run_id,)
+            pending = self.records.db.rows(
+                select(Interaction).where(
+                    Interaction.run_id == run_id, Interaction.status == "pending"
+                )
             )
             if interrupt_id is None and len(pending) != 1:
                 raise ValueError("必须指定 interruptId")
@@ -193,12 +210,12 @@ class WorkflowSession(AgentSession):
                 config = validate_preview(response, self.sandbox)
                 state["snapshot"]["preview"] = config
                 self.records.update(
-                    "projects",
+                    Project,
                     self.record["project_id"],
                     preview_json=dumps(config),
                     updated_at=now(),
                 )
-                self.records.update("runs", run_id, config_snapshot_json=dumps(state["snapshot"]))
+                self.records.update(Run, run_id, config_snapshot_json=dumps(state["snapshot"]))
             elif state.get("manual") == "capture_approval":
                 if not isinstance(response, Mapping) or response.get("approved") is not True:
                     state["cancelled"] = True
@@ -220,10 +237,13 @@ class WorkflowSession(AgentSession):
                     state["review_attempt"] = state.get("review_attempt", 0) + 1
                     state["phase"] = "capture"
             else:
-                state["resume"] = Command(resume={selected["interrupt_id"]: response})
+                graph_id = state.get("interrupt_ids", {}).get(
+                    selected["interrupt_id"], selected["interrupt_id"]
+                )
+                state["resume"] = Command(resume={graph_id: response})
             with self.records.db.transaction():
                 self.records.update(
-                    "interactions",
+                    Interaction,
                     selected["id"],
                     response_json=dumps(response),
                     status="resolved",
@@ -233,7 +253,7 @@ class WorkflowSession(AgentSession):
                     self.records.message(
                         self.id, "user", "补充信息：" + dumps(response), run_id=run_id
                     )
-                self.records.update("runs", run_id, status="running", updated_at=now())
+                self.records.update(Run, run_id, status="running", updated_at=now())
             state.pop("manual", None)
             return self._execute(run_id, state, on_progress)
         finally:
@@ -472,7 +492,7 @@ class WorkflowSession(AgentSession):
         if key == "review" and state.get("review_attempt"):
             key += f"_retry_{state['review_attempt']}"
         row = self.records.insert(
-            "agent_runs",
+            AgentRun,
             id=uid(),
             run_id=run_id,
             step_key=key,
@@ -480,6 +500,7 @@ class WorkflowSession(AgentSession):
             iteration=state["iteration"],
             status="running",
             input_json=dumps(inputs),
+            config_snapshot_json=dumps(config),
             created_at=now(),
             updated_at=now(),
         )
@@ -491,7 +512,7 @@ class WorkflowSession(AgentSession):
         """保存阶段结果和内部交接消息后发送完成事件。"""
         with self.records.db.transaction():
             self.records.update(
-                "agent_runs",
+                AgentRun,
                 agent_run,
                 status="completed",
                 output=output,
@@ -520,10 +541,28 @@ class WorkflowSession(AgentSession):
             state["code_agent_run_id"] = agent_run
             llm = self._model(config)
             tools = self._tools(config["agent"])
+            from .registry import registry_tools
+
+            configs = [
+                c for c in state["snapshot"]["agents"] if c["agent"]["id"] != config["agent"]["id"]
+            ]
+            allowed = config["agent"]["allowed_tools"]
+            tools.update(
+                {
+                    key: value
+                    for key, value in registry_tools(configs).items()
+                    if "*" in allowed or key in allowed
+                }
+            )
             planner = self.runtime._planner_factory(llm, tools)
             state["planner"] = planner
             if hasattr(planner, "set_instructions"):
-                planner.set_instructions(config["agent"]["instructions"])
+                from .registry import catalog
+
+                instructions = config["agent"]["instructions"]
+                if "call_agent" in tools:
+                    instructions += "\n本轮可调用的 Agent：\n" + dumps(catalog(configs))
+                planner.set_instructions(instructions)
             goal = (
                 "历史会话（仅供参考）：\n" + dumps(inputs["history"]) + "\n本轮目标：\n" + current
             )
@@ -556,13 +595,15 @@ class WorkflowSession(AgentSession):
                 checkpointer=InMemorySaver(),
                 collect_feedback=self.feedback_sink is not None,
                 feedback_sink=self.feedback_sink,
+                serial="call_agent" in tools,
+                delegate=lambda task: self._delegate(run_id, state, task, configs, progress),
             )
             state["graph_input"] = {"goal": goal}
             state["task_ids"] = {}
         graph = state["graph"]
         agent_run = state["code_agent_run_id"]
         state["agent_run_id"] = agent_run
-        self.records.update("agent_runs", agent_run, status="running", updated_at=now())
+        self.records.update(AgentRun, agent_run, status="running", updated_at=now())
         graph_config = {"configurable": {"thread_id": agent_run}}
         value = state.pop("resume", state["graph_input"])
         for chunk in graph.stream(value, graph_config, stream_mode="updates"):
@@ -571,15 +612,13 @@ class WorkflowSession(AgentSession):
                     continue
                 if node == "plan":
                     with self.records.db.transaction():
-                        self.records.db.connection.execute(
-                            "DELETE FROM tasks WHERE agent_run_id=?", (agent_run,)
-                        )
+                        self.records.db.execute(delete(Task).where(Task.agent_run_id == agent_run))
                         mapped = []
                         for task in update["tasks"]:
                             task_id = uid()
                             state["task_ids"][task["id"]] = task_id
                             self.records.insert(
-                                "tasks",
+                                Task,
                                 id=task_id,
                                 agent_run_id=agent_run,
                                 task_key=task["id"],
@@ -597,9 +636,9 @@ class WorkflowSession(AgentSession):
                 if node == "dispatch":
                     with self.records.db.transaction() as connection:
                         connection.execute(
-                            "UPDATE tasks SET status='running', updated_at=? "
-                            "WHERE agent_run_id=? AND status='queued'",
-                            (now(), agent_run),
+                            orm_update(Task)
+                            .where(Task.agent_run_id == agent_run, Task.status == "queued")
+                            .values(status="running", updated_at=now())
                         )
                 if node == "execute":
                     results = []
@@ -607,7 +646,7 @@ class WorkflowSession(AgentSession):
                         task_id = state["task_ids"][result["task_id"]]
                         output = self.runtime.redact(result["output"])
                         self.records.update(
-                            "tasks",
+                            Task,
                             task_id,
                             status="completed" if result["ok"] else "failed",
                             output=output,
@@ -623,30 +662,33 @@ class WorkflowSession(AgentSession):
         interruptions = [item for task in snapshot.tasks for item in task.interrupts]
         if interruptions:
             with self.records.db.transaction():
-                self.records.db.connection.execute(
-                    "UPDATE tasks SET status='waiting', updated_at=? "
-                    "WHERE agent_run_id=? AND status IN ('queued','running')",
-                    (now(), agent_run),
+                self.records.db.execute(
+                    orm_update(Task)
+                    .where(Task.agent_run_id == agent_run, Task.status.in_(("queued", "running")))
+                    .values(status="waiting", updated_at=now())
                 )
                 for item in interruptions:
-                    if not self.records.db.one(
-                        "SELECT id FROM interactions WHERE run_id=? AND interrupt_id=?",
-                        (run_id, item.id),
+                    public_id = item.value.get("delegationInterruptId", item.id)
+                    state.setdefault("interrupt_ids", {})[public_id] = item.id
+                    if not self.records.db.first(
+                        select(Interaction.id).where(
+                            Interaction.run_id == run_id, Interaction.interrupt_id == public_id
+                        )
                     ):
                         self.records.insert(
-                            "interactions",
+                            Interaction,
                             id=uid(),
                             run_id=run_id,
-                            agent_run_id=agent_run,
-                            interrupt_id=item.id,
+                            agent_run_id=item.value.get("agentRunId", agent_run),
+                            interrupt_id=public_id,
                             kind=item.value.get("kind", "approval"),
                             request_json=dumps(item.value),
                             created_at=now(),
                             updated_at=now(),
                         )
-                self.records.update("agent_runs", agent_run, status="waiting", updated_at=now())
+                self.records.update(AgentRun, agent_run, status="waiting", updated_at=now())
                 self.records.update(
-                    "runs",
+                    Run,
                     run_id,
                     status="waiting",
                     updated_at=now(),
@@ -668,6 +710,12 @@ class WorkflowSession(AgentSession):
             getattr(state.get("planner"), "usage", {}),
         )
         return True
+
+    def _delegate(self, run_id, state, task, configs, progress):
+        """在父运行内恢复独立子执行，不重建顶层会话。"""
+        from .delegation import execute_delegate
+
+        return execute_delegate(self, run_id, state, task, configs, progress)
 
     def _review(self, run_id, state, progress):
         """向视觉模型传递真实图片并验证审查证据。"""
@@ -740,10 +788,11 @@ class WorkflowSession(AgentSession):
         )
         previous = {
             row["id"]
-            for row in self.records.db.all(
-                "SELECT f.id FROM review_findings f JOIN reviews r ON f.review_id=r.id "
-                "JOIN agent_runs a ON r.agent_run_id=a.id WHERE a.run_id=?",
-                (run_id,),
+            for row in self.records.db.rows(
+                select(ReviewFinding.id)
+                .join(ReviewFinding.review)
+                .join(Review.agent_run)
+                .where(AgentRun.run_id == run_id)
             )
         }
         for finding in result.findings:
@@ -767,7 +816,7 @@ class WorkflowSession(AgentSession):
             )
         with self.records.db.transaction():
             review = self.records.insert(
-                "reviews",
+                Review,
                 id=uid(),
                 agent_run_id=agent_run,
                 code_agent_run_id=state["code_agent_run_id"],
@@ -777,14 +826,12 @@ class WorkflowSession(AgentSession):
                 created_at=now(),
             )
             for artifact_id in state["artifacts"]:
-                self.records.insert(
-                    "review_artifacts", review_id=review["id"], artifact_id=artifact_id
-                )
+                self.records.insert(ReviewArtifact, review_id=review["id"], artifact_id=artifact_id)
             findings = []
             for finding in result.findings:
                 values = finding.model_dump(exclude={"bbox"})
                 item = self.records.insert(
-                    "review_findings",
+                    ReviewFinding,
                     id=uid(),
                     review_id=review["id"],
                     bbox_json=dumps(finding.bbox),
@@ -793,7 +840,7 @@ class WorkflowSession(AgentSession):
                 findings.append(item)
             output = self.runtime.redact(result.model_dump_json())
             self.records.update(
-                "agent_runs",
+                AgentRun,
                 agent_run,
                 status="completed",
                 output=output,
@@ -835,10 +882,10 @@ class WorkflowSession(AgentSession):
             state["phase"] = previous_phase
         with self.records.db.transaction():
             self.records.update(
-                "agent_runs", agent_run, status="failed", error=reason, updated_at=now()
+                AgentRun, agent_run, status="failed", error=reason, updated_at=now()
             )
             review = self.records.insert(
-                "reviews",
+                Review,
                 id=uid(),
                 agent_run_id=agent_run,
                 code_agent_run_id=state["code_agent_run_id"],
@@ -868,7 +915,7 @@ class WorkflowSession(AgentSession):
         state["manual"] = manual
         with self.records.db.transaction():
             self.records.insert(
-                "interactions",
+                Interaction,
                 id=uid(),
                 run_id=run_id,
                 interrupt_id=uid(),
@@ -878,7 +925,7 @@ class WorkflowSession(AgentSession):
                 updated_at=now(),
             )
             self.records.update(
-                "runs",
+                Run,
                 run_id,
                 status="waiting",
                 updated_at=now(),
@@ -902,7 +949,7 @@ class WorkflowSession(AgentSession):
         state["report"] = report
         with self.records.db.transaction() as connection:
             self.records.update(
-                "runs",
+                Run,
                 run_id,
                 status=status,
                 ended_at=now(),
@@ -910,7 +957,7 @@ class WorkflowSession(AgentSession):
                 error=report if status == "failed" else "",
                 state_json=dumps(self._public_state(state)),
             )
-            self.records.update("sessions", self.id, updated_at=now())
+            self.records.update(ConversationSession, self.id, updated_at=now())
             self.records.event(run_id, "run." + status, self._public_state(state))
             self.records.message(
                 self.id,
@@ -922,20 +969,22 @@ class WorkflowSession(AgentSession):
                 status="completed" if status == "completed" else "failed",
             )
             connection.execute(
-                "UPDATE interactions SET status='expired', updated_at=? "
-                "WHERE run_id=? AND status='pending'",
-                (now(), run_id),
+                orm_update(Interaction)
+                .where(Interaction.run_id == run_id, Interaction.status == "pending")
+                .values(status="expired", updated_at=now())
             )
             connection.execute(
-                "UPDATE tasks SET status=?, updated_at=? WHERE agent_run_id IN "
-                "(SELECT id FROM agent_runs WHERE run_id=?) "
-                "AND status IN ('queued','running','waiting')",
-                (status, now(), run_id),
+                orm_update(Task)
+                .where(
+                    Task.agent_run_id.in_(select(AgentRun.id).where(AgentRun.run_id == run_id)),
+                    Task.status.in_(("queued", "running", "waiting")),
+                )
+                .values(status=status, updated_at=now())
             )
             connection.execute(
-                "UPDATE agent_runs SET status=?, error=?, updated_at=? "
-                "WHERE run_id=? AND status IN ('running','waiting')",
-                (status, report if status == "failed" else "", now(), run_id),
+                orm_update(AgentRun)
+                .where(AgentRun.run_id == run_id, AgentRun.status.in_(("running", "waiting")))
+                .values(status=status, error=report if status == "failed" else "", updated_at=now())
             )
         if run_id in self._run_ids:
             try:
@@ -947,11 +996,13 @@ class WorkflowSession(AgentSession):
 
     def _result(self, run_id):
         """读取已提交的运行状态及有效交互。"""
-        run = self.records.get("runs", run_id)
+        run = self.records.get(Run, run_id)
         pending = [
             decode(row)
-            for row in self.records.db.all(
-                "SELECT * FROM interactions WHERE run_id=? AND status='pending'", (run_id,)
+            for row in self.records.db.rows(
+                select(Interaction).where(
+                    Interaction.run_id == run_id, Interaction.status == "pending"
+                )
             )
         ]
         return RunUpdate(
