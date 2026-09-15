@@ -1,6 +1,0 @@
-{
-  "src/agent": "0.2.0",
-  "src/cli": "0.2.0",
-  "src/frontend": "0.1.0",
-  "src/tauri": "0.1.0"
-}

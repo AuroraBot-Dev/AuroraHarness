@@ -43,8 +43,8 @@ node scripts/tasks.mjs setup
 
 ## 提交规范
 
-使用 [Conventional Commits](https://www.conventionalcommits.org/)，Release Please 依赖它生成
-版本与 CHANGELOG：
+使用 [Conventional Commits](https://www.conventionalcommits.org/)。目前没有自动生成版本与
+CHANGELOG 的流水线，但统一格式让历史可读、可检索，也让将来接自动化时不用返工：
 
 ```
 <type>(<scope>): <subject>

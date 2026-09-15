@@ -12,10 +12,9 @@
     "*.vue": "${capture}.spec.ts, ${capture}.test.ts, ${capture}.stories.*, ${capture}.css, index.ts",
     "*.ts": "${capture}.spec.ts, ${capture}.test.ts, ${capture}.d.ts",
     "Cargo.toml": "Cargo.lock, rust-toolchain.toml, build.rs, clippy.toml, rustfmt.toml, deny.toml",
-    "pyproject.toml": "uv.lock, .python-version, .env.example, ruff.toml, .ruff.toml, pytest.ini, tox.ini, .coverage, pyrightconfig.json, .pre-commit-config.yaml",
+    "pyproject.toml": "uv.lock, .python-version, .env.example, ruff.toml, .ruff.toml, pytest.ini, tox.ini, .coverage, pyrightconfig.json",
     "package.json": "pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc, tsconfig*.json, nuxt.config.ts, eslint.config.*, vitest.config.*, playwright.config.*, uno.config.*, .prettierrc*, .stylelintrc*, .env.example",
     "tauri.conf.json": "tauri.*.json",
-    "release-please-config.json": ".release-please-manifest.json",
     "README.md": "README.*.md, LICENSE, CODE_OF_CONDUCT.md, CONTRIBUTING.md, CONTRIBUTING.*.md, AGENTS.md, CHANGELOG.md",
     ".gitignore": ".gitattributes, .gitmodules, .editorconfig, lefthook.yml",
     ".env": ".env.example, .env.*"

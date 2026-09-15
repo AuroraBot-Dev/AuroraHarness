@@ -81,5 +81,5 @@ pnpm generate          # 生成 .output/public，供 Tauri 打包
 ## 说明
 
 - 请使用 **pnpm 11**：`patches/` 下的补丁文件在 pnpm 12 上会因更严格的解析而安装失败。
-- 版本由 Release Please 以前端包 `aurora-frontend` 管理（`src/frontend/CHANGELOG.md`）。
-  桌面应用的产品版本归 `src/tauri`（`aurora-desktop`），前端版本与它各自演进。
+  `node scripts/tasks.mjs` 检测到其他大版本时会自动改用 `npx pnpm@11`。
+- 版本写在 `package.json` 里，与桌面应用的产品版本（归 `src/tauri`）各自演进。

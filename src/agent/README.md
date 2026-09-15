@@ -238,9 +238,10 @@ uv run pip-audit
 
 测试默认收集分支覆盖率并要求总覆盖率不低于 60%。
 
-## 发布
+## 版本
 
-版本遵循 SemVer。合并 Conventional Commits 后，Release Please 按包维护各自的版本 PR 与 `CHANGELOG.md`；合并后产生的 `aurora-agent-v*` / `aurora-cli-v*` tag 会触发 wheel/sdist、GitHub Release 和 PyPI Trusted Publishing。
+版本遵循 SemVer，手写在 `src/agent/pyproject.toml` 与 `src/cli/pyproject.toml` 里。仓库当前
+没有自动发版流水线，需要出包时在仓库根执行 `uv build --all-packages --out-dir dist`。
 
 ## 常见问题
 

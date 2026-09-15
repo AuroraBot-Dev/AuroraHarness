@@ -10,7 +10,7 @@
 // 参数透传示例：node scripts/tasks.mjs build-desktop -- --bundles nsis
 
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, rmSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -84,6 +84,24 @@ function requirePythonDistributions() {
 function buildSidecar() {
   requirePythonDistributions()
   step(process.execPath, [path.join(TAURI, 'scripts', 'build-sidecar.mjs')])
+}
+
+/**
+ * 删除文件或目录；对符号链接/junction 只删链接本身。
+ *
+ * Nitro 会生成 `.output/public` 的 dist 链接（Windows 上是 junction），直接用递归删除会顺着
+ * 链接删到目标里去。断链的目标不存在，所以这里用 lstat 而不是 existsSync 判断。
+ */
+function removePath(target) {
+  let stats
+  try {
+    stats = lstatSync(target)
+  } catch {
+    return false
+  }
+  if (stats.isSymbolicLink()) unlinkSync(target)
+  else rmSync(target, { recursive: true, force: true })
+  return true
 }
 
 const tasks = {
@@ -162,8 +180,9 @@ const tasks = {
       path.join(TAURI, 'resources', 'sidecar', 'site-packages'),
       path.join(FRONTEND, '.output'),
       path.join(FRONTEND, '.nuxt'),
+      path.join(FRONTEND, 'dist'),
     ]) {
-      rmSync(target, { recursive: true, force: true })
+      if (!removePath(target)) continue
       console.log(`已清理 ${path.relative(REPO_ROOT, target)}`)
     }
   },
