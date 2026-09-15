@@ -120,11 +120,25 @@ src/frontend/     pnpm 包                                     → pnpm-lock.yam
 
 ## 发布
 
-版本遵循 SemVer，由 Release Please 按包维护（`src/agent`、`src/cli`、`src/frontend`）。
-合并版本 PR 后产生的 tag 会触发对应流水线：
+版本遵循 SemVer，由 Release Please 按包维护。四个包各自独立演进：
+
+| 包路径 | 包名 | tag |
+|---|---|---|
+| `src/agent` | `aurora-agent` | `aurora-agent-v*` |
+| `src/cli` | `aurora-cli` | `aurora-cli-v*` |
+| `src/frontend` | `aurora-frontend` | `aurora-frontend-v*` |
+| `src/tauri` | `aurora-desktop` | `aurora-desktop-v*` |
+
+桌面应用的产品版本归 `src/tauri`（写入 `Cargo.toml` 与 `tauri.conf.json`），前端包版本只代表
+界面层。合并版本 PR 后产生的 tag 会触发对应流水线：
 
 - `aurora-agent-v*` / `aurora-cli-v*` → 构建 wheel/sdist 并发布到 PyPI
 - `aurora-desktop-v*` → 构建三平台 Tauri 安装包
+
+> 注：release-please 需要仓库允许 GitHub Actions 创建 PR。组织 `AuroraBot-Dev` 目前关闭了该
+> 开关，需在组织设置 → Actions → General → Workflow permissions 中勾选
+> "Allow GitHub Actions to create and approve pull requests"，否则 Release Please 会在最后
+> 一步创建 PR 时失败。
 
 ## 许可证
 

@@ -75,3 +75,9 @@ cd src/frontend && pnpm tauri build
 
 `tauri.conf.json` 中的跨层路径都指回 `../frontend`，Tauri CLI 的定位方式见
 [`docs/architecture.md`](../../docs/architecture.md)。
+
+## 版本与发布
+
+桌面应用的产品版本由本层持有：`Cargo.toml` 的 `package.version` 与 `tauri.conf.json` 的
+`version` 由 Release Please 的 `aurora-desktop` 包同步维护（见根
+`release-please-config.json`）。前端包 `aurora-frontend` 的版本与它各自演进，互不牵扯。
