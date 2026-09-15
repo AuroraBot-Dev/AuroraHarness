@@ -131,6 +131,8 @@ lefthook.yml       唯一的 Git 钩子来源（git 根）
 | Python 解释器位置 | Windows 的 `prefix` 根下就是 `python.exe`，类 Unix 在 `bin/` 下。打包 sidecar 时用 `sys.prefix` / `sysconfig` 询问解释器，不要靠目录层级猜。 |
 | 依赖注入位置 | 依赖必须落在解释器自身的 `site-packages`：`.pth` 只在自身的 site-packages 下执行（pywin32 的 DLL bootstrap 依赖它）。 |
 | 类型检查平台 | `pyrightconfig.json` 固定 `pythonPlatform: Linux`，与 CI 一致，避免在 Windows 本地因 `os.O_CLOEXEC` 这类 Unix 专有 API 误报。要查 Windows 语义可临时加 `--pythonplatform Windows`。 |
+| 文本文件 I/O | 一律显式 `encoding="utf-8"`。不指定就用宿主 locale 编码：macOS / Linux 是 UTF-8，而英文 Windows 是 cp1252，中文内容在那边会直接抛 `UnicodeEncodeError`，中文路径还会解成乱码。`src/agent/tests/test_portability.py` 用 AST 扫描守住这条约定。 |
+| HTTP 探测 | 探测本机服务（预览服务等）必须绕开系统代理：`ProxyHandler({})`。不少 CI 与公司网络设置了 `HTTP_PROXY`，否则连 `127.0.0.1` 也会被转发出去。 |
 | CI 覆盖 | Python 与 Rust 都跑 ubuntu / windows / macos 三平台矩阵。**改动平台相关代码后不要只看自己那台机器。** |
 
 ## 已知的偏离与待办
@@ -138,7 +140,11 @@ lefthook.yml       唯一的 Git 钩子来源（git 根）
 诚实记录当前状态，避免把它们当成「已解决」：
 
 - 协议版本号仍是三处手写常量，尚未做生成或校验（见 `docs/adr/001-protocol-version.md`）。
+- `preview.py` 等待本机预览服务就绪的时限**硬编码为 20 秒**，且不可配置。实测在 macOS CI 上
+  满载跑测试时，同一台机器上 `python -m http.server` 的启动会超过这个时限（空闲时约 6 秒），
+  表现为「预览服务启动超时」；真实用户的 dev server 冷启动也可能更久。建议改成可配置项并给出
+  更宽松的默认值。
+- 浏览器预览测试只在 ubuntu 上执行（那里会安装 Chromium）；Windows / macOS 上由于没有浏览器
+  而跳过，桌面壳在那边只做 `cargo check`，真正的安装包构建在 tag 触发的 release 流水线里做。
 - `docs/notes/` 下的两份文档记录了合并前两个仓库的工程化过程，其中的目录约定与命令已经
   过时，保留作为历史参考。
-- 前端 `playwright` E2E 只在 ubuntu 上跑；Windows / macOS 的桌面壳只做 `cargo check`，
-  真正的安装包构建在 tag 触发的 release 流水线里做。
