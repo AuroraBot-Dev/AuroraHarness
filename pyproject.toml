@@ -15,7 +15,6 @@ aurora-agent = { workspace = true }
 [dependency-groups]
 dev = [
     "pip-audit>=2.8,<3",
-    "pre-commit>=4,<5",
     "pyright>=1.1.400",
     "pytest>=9.1.1",
     "pytest-cov>=6,<8",

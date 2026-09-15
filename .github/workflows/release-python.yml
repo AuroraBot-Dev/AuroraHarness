@@ -1,0 +1,35 @@
+name: Release Python
+
+# 由 release-please 打出的 tag 触发（多包模式下 tag 形如 aurora-agent-v0.3.0）。
+on:
+  push:
+    tags:
+      - "aurora-agent-v*"
+      - "aurora-cli-v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      # 一次构建工作区里的全部 Python 分布。
+      - run: uv build --all-packages --out-dir dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - run: uv build --all-packages --out-dir dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

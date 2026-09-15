@@ -1,1 +1,0 @@
-pub const PROTOCOL_VERSION: u64 = 1;

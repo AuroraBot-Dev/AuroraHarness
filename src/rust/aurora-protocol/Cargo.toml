@@ -1,0 +1,9 @@
+[package]
+name = "aurora-protocol"
+version = "0.1.0"
+description = "Aurora 桌面协议 v1 契约：版本号、信封校验与帧分类"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+serde_json = "1"

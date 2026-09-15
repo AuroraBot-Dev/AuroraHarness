@@ -1,0 +1,17 @@
+[package]
+name = "aurora-runtime-broker"
+version = "0.1.0"
+description = "Aurora Python 运行时的进程监管与协议 v1 NDJSON 代理（不依赖 tauri）"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+aurora-protocol = { path = "../aurora-protocol" }
+keyring = { version = "3", default-features = false, features = [
+  "apple-native",
+  "windows-native",
+  "linux-native-sync-persistent",
+  "crypto-rust",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

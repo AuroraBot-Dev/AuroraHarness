@@ -1,0 +1,51 @@
+name: Python
+
+# 只管 Python 的两层：src/agent（aurora-agent）与 src/cli（aurora-cli）。
+# 用 paths 过滤，避免前端或 Rust 的改动触发这一组检查。
+on:
+  push:
+    paths:
+      - "src/agent/**"
+      - "src/cli/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "pyrightconfig.json"
+      - ".github/workflows/python.yml"
+  pull_request:
+    paths:
+      - "src/agent/**"
+      - "src/cli/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "pyrightconfig.json"
+      - ".github/workflows/python.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      # 一份 uv.lock 同时装好 aurora-agent 与 aurora-cli。
+      - run: uv sync --frozen
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen ruff format --check .
+      - run: uv run --frozen pyright
+      - run: uv run --frozen pytest -v
+      # 冒烟：两个分布的入口都能导入（re-export 与实现文件必须同步）。
+      - run: >-
+          uv run --frozen python -c
+          "from aurora.agent.transport import serve_websocket; from aurora.cli.main import build_parser"
+      - run: uv run --frozen pip-audit
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

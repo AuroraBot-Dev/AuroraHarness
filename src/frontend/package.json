@@ -5,7 +5,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "setup": "bash scripts/setup.sh",
     "dev": "nuxt dev",
     "build": "nuxt build",
     "generate": "nuxt generate",
@@ -18,7 +17,7 @@
     "test:e2e": "playwright test",
     "test:watch": "vitest",
     "postinstall": "nuxt prepare",
-    "tauri": "tauri",
+    "tauri": "node ../tauri/scripts/tauri.mjs",
     "prepare": "lefthook install"
   },
   "dependencies": {

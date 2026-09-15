@@ -1,0 +1,12 @@
+# 统一文本处理：仓库内一律以 LF 存储，检出时按平台还原换行。
+* text=auto
+
+# 脚本必须保持 LF，否则在 Linux/macOS 的 CI 上无法执行。
+*.sh text eol=lf
+
+# 二进制资源不做文本转换。
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
+*.sqlite binary

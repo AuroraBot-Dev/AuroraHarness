@@ -23,6 +23,4 @@ export default defineNuxtConfig({
     envPrefix: ['VITE_', 'TAURI_'],
     server: { strictPort: true },
   },
-  // 避免 Nuxt 监听 Rust 工程
-  ignore: ['**/src-tauri/**'],
 })

@@ -1,0 +1,56 @@
+name: Rust
+
+# 覆盖 Rust 的两个层次。crates 作业不需要任何桌面系统库，因此单独成一个作业：
+# 它跑得快，也顺带证明「broker 与桌面壳解耦」这条分层约束没有被破坏。
+on:
+  push:
+    paths:
+      - "src/rust/**"
+      - "src/tauri/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths:
+      - "src/rust/**"
+      - "src/tauri/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/rust.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  crates:
+    name: 纯 Rust 层
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p aurora-protocol -p aurora-runtime-broker
+      # 分层守卫：运行时代理必须与 Tauri 解耦，否则它就不再能脱离桌面壳单独编译。
+      - name: 断言 broker 不依赖 tauri
+        run: |
+          if cargo tree -p aurora-runtime-broker --prefix none | grep -qE '\btauri(-[a-z]+)* v'; then
+            echo "::error::aurora-runtime-broker 不应依赖 tauri"
+            exit 1
+          fi
+
+  shell:
+    name: Tauri 壳
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 安装 Tauri 的 Linux 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev
+      - run: cargo check -p aurora-desktop

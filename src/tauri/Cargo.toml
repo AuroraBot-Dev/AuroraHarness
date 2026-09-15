@@ -1,0 +1,20 @@
+[package]
+name = "aurora-desktop"
+version = "0.1.0"
+description = "Aurora Agent 桌面壳（Tauri 2）：命令、事件桥与系统钥匙串接线"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "aurora_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aurora-protocol = { path = "../rust/aurora-protocol" }
+aurora-runtime-broker = { path = "../rust/aurora-runtime-broker" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde_json = "1"

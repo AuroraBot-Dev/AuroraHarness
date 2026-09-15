@@ -1,8 +1,12 @@
-# Aurora
+# aurora-agent（agent 层）
 
 形如 CodeX 的全平台桌面 AI Agent 应用 —— 用户把项目交给 Agent，Agent 会自主规划、委派并完成开发任务。
 
 > 完整的设计与使用文档见：[AuroraAgent-demo 文档站](https://haha-ha-cuo.github.io/AuroraAgent-demo/)
+
+本目录是 AuroraHarness 的 **agent 层**，分布名 `aurora-agent`：运行时、委派图、工具、沙箱、存储与传输协议都在这里。命令行入口在 `src/cli`（分布名 `aurora-cli`），它单向依赖本层；本层不导入 `aurora.cli`，因此可以脱离 CLI 独立安装使用。分层全貌见 [`docs/architecture.md`](../../docs/architecture.md)。
+
+> 下文所有 `uv run ...` 都在**仓库根**执行——根目录才是 uv 工作区所在。
 
 ## 项目定位
 
@@ -47,22 +51,25 @@
 ## 目录结构
 
 ```
-src/aurora/
-├── logging.py          # 统一彩色日志（RichHandler）
-├── cli/                # 命令行入口（一个命令一个文件）
-├── agent/
-│   ├── core/           # 委派图 + 规划器 + 推理强度
-│   ├── tools/          # 工具抽象 + 内置工具 + 沙箱工具 + 风险分级
-│   ├── safety/         # 确认门 / 安全权限模型
-│   ├── sandbox/        # 沙箱：隔离工作区 + 受限执行后端
-│   ├── model_access/   # 本地 API 管理层（待实现）
-│   ├── capability/     # 能力特化层（待实现）
-│   ├── cache/          # 缓存层（待实现）
-│   ├── mcp/            # 目录式 MCP 功能包、插件注册表、Client 与工具适配
-│   ├── store/          # SQLite 持久化（待实现）
-│   └── transport/      # 运行时协议 / stdio NDJSON
-└── eval/               # 评估与校准（待实现）
-tests/                  # pytest 测试
+src/agent/                     # 分布：aurora-agent
+├── pyproject.toml             # name = aurora-agent
+├── src/aurora/
+│   ├── protocol.py            # 协议版本（与 Rust / 前端三处必须一致）
+│   ├── logging.py             # 统一彩色日志（RichHandler）
+│   ├── text.py                # 文本清洗与脱敏辅助
+│   ├── agent/
+│   │   ├── core/              # 委派图 + 规划器 + 推理强度
+│   │   ├── tools/             # 工具抽象 + 内置工具 + 沙箱工具 + 风险分级
+│   │   ├── safety/            # 确认门 / 安全权限模型
+│   │   ├── sandbox/           # 沙箱：隔离工作区 + 受限执行后端
+│   │   ├── model_access/      # 本地 API 管理层
+│   │   ├── mcp/               # 目录式 MCP 功能包、插件注册表、Client 与工具适配
+│   │   ├── store/             # SQLite 持久化
+│   │   └── transport/         # 运行时协议 / stdio NDJSON / WebSocket
+│   └── eval/                  # 评估与校准
+└── tests/                     # pytest 测试
+
+src/cli/                       # 另一个分布：aurora-cli，只做参数解析与命令分发
 ```
 
 ## 快速开始
@@ -73,6 +80,8 @@ tests/                  # pytest 测试
 - Python 3.13
 
 ### 安装
+
+在仓库根执行，一次装好 `aurora-agent` 与 `aurora-cli` 两个分布：
 
 ```bash
 uv sync
@@ -134,7 +143,7 @@ uv run aurora runtime
 uv run aurora runtime --port 8765
 ```
 
-WebSocket 地址为 `ws://127.0.0.1:8765/ws`。同级 `AuroraAgentFrontend` 项目的 `pnpm dev` 会自动执行这条命令，无需手动启动。
+WebSocket 地址为 `ws://127.0.0.1:8765/ws`。`src/frontend` 的 `pnpm dev` 会自动执行这条命令（工作目录为仓库根），无需手动启动。
 
 ```json
 {"id":"1","method":"workspace.validate","params":{"path":"/path/to/project"}}
@@ -204,14 +213,18 @@ AURORA_LOG_LEVEL=DEBUG uv run aurora demo
 
 设计文档、架构决策（ADR）与路线图见 [AuroraAgent-demo](https://haha-ha-cuo.github.io/AuroraAgent-demo/)。
 
-仓库内决策记录见 [`docs/adr/`](docs/adr/README.md)。
+仓库内决策记录见 [`docs/adr/`](../../docs/adr/README.md)。
 
 ## 开发指南
 
-两个仓库推荐作为同级目录放置。贡献流程、分支和提交规范见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。提交后端代码前运行：
+贡献流程、分支和提交规范见仓库根的 [`CONTRIBUTING.md`](../../CONTRIBUTING.md)。提交钩子由 lefthook 统一管理（配置在仓库根 `lefthook.yml`），改动 Python 文件时会自动跑 ruff 与 pyright。
+
+想手动全量跑一遍：
 
 ```bash
-uv run pre-commit run --all-files
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
 ```
 
 ## 测试
@@ -227,7 +240,7 @@ uv run pip-audit
 
 ## 发布
 
-版本遵循 SemVer。合并 Conventional Commits 后，Release Please 自动维护版本 PR 与 `CHANGELOG.md`；版本 PR 合并产生的 `v*` tag 会触发 wheel/sdist、GitHub Release 和 PyPI Trusted Publishing。
+版本遵循 SemVer。合并 Conventional Commits 后，Release Please 按包维护各自的版本 PR 与 `CHANGELOG.md`；合并后产生的 `aurora-agent-v*` / `aurora-cli-v*` tag 会触发 wheel/sdist、GitHub Release 和 PyPI Trusted Publishing。
 
 ## 常见问题
 
@@ -237,8 +250,8 @@ uv run pip-audit
 
 ## 许可证
 
-本项目采用 [MIT License](LICENSE)。
+本项目采用 [MIT License](../../LICENSE)。
 
 ## 数据库与多 Agent 协作
 
-本地历史、模型与 Agent 配置、预设协作流程和视觉审查记录由 SQLite 管理。配置步骤、数据结构、接口及重启行为见 [数据库与协作说明](docs/database.md)。视觉审查首次使用前运行 `uv run playwright install chromium`。
+本地历史、模型与 Agent 配置、预设协作流程和视觉审查记录由 SQLite 管理。配置步骤、数据结构、接口及重启行为见 [数据库与协作说明](../../docs/database.md)。视觉审查首次使用前运行 `uv run playwright install chromium`。

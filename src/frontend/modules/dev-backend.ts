@@ -25,8 +25,10 @@ export default function devBackend(_inlineOptions: unknown, nuxt: NuxtLike) {
   if (process.env.TAURI_ENV_PLATFORM) return
   if (process.env.VITE_RUNTIME_WS) return
 
-  const backendRoot = process.env.AURORA_ROOT
-    ?? fileURLToPath(new URL('../../AuroraAgentBackend', import.meta.url))
+  // 运行时由 src/cli 与 src/agent 两个分布提供，`uv run` 必须在 uv 工作区根执行。
+  // 本文件位于 <repo>/src/frontend/modules，往上三级即仓库根。
+  const repoRoot = process.env.AURORA_ROOT
+    ?? fileURLToPath(new URL('../../../', import.meta.url))
 
   const stopBackend = () => {
     const running = backendState.child
@@ -47,12 +49,12 @@ export default function devBackend(_inlineOptions: unknown, nuxt: NuxtLike) {
 
   nuxt.hook('listen', () => {
     if (backendState.child) return
-    if (!existsSync(backendRoot)) {
-      console.error(`[aurora] 后端目录不存在: ${backendRoot}。请将 AuroraAgentBackend 与 AuroraAgentFrontend 放在同一目录，或设置 AURORA_ROOT。`)
+    if (!existsSync(repoRoot)) {
+      console.error(`[aurora] 仓库根目录不存在: ${repoRoot}。请设置 AURORA_ROOT 指向 AuroraHarness 仓库根。`)
       return
     }
     const child = spawn('uv', ['run', '--no-sync', 'aurora', 'runtime', '--port', '8765'], {
-      cwd: backendRoot,
+      cwd: repoRoot,
       stdio: 'inherit',
       env: process.env,
       detached: process.platform !== 'win32',

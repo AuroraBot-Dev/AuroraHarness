@@ -1,9 +1,0 @@
-{
-  "packages": {
-    ".": {
-      "release-type": "python",
-      "package-name": "auroraapp",
-      "changelog-path": "CHANGELOG.md"
-    }
-  }
-}

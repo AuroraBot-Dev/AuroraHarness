@@ -1,0 +1,37 @@
+# 仓库级 Git 钩子。
+#
+# 合并成单仓后钩子只有一处生效：lefthook 从 git 根读取本文件，所以前端与 Python 的
+# 检查都集中在这里，不再保留 src/frontend/lefthook.yml 或 .pre-commit-config.yaml
+# （两套钩子管理器会争抢同一个 .git/hooks/pre-commit，后装的会让前者静默失效）。
+#
+# 路径约定：
+# * Python 命令不设 root，在仓库根执行——uv 工作区根就在这里。
+# * 前端命令用 root 切到 src/frontend，lefthook 会把 {staged_files} 改写为该目录下的
+#   相对路径，命令里无需再做路径处理。
+# * glob 按 root 下的相对路径匹配，因此前端命令不会因为 Python 改动而被触发。
+#
+# parallel 关闭是有意的：有三个 stage_fixed 命令，串行执行才能保证 git index 不被并发写。
+
+pre-commit:
+  parallel: false
+  commands:
+    ruff-check:
+      glob: "*.py"
+      run: uv run --frozen ruff check --fix {staged_files}
+      stage_fixed: true
+    ruff-format:
+      glob: "*.py"
+      run: uv run --frozen ruff format {staged_files}
+      stage_fixed: true
+    pyright:
+      glob: "*.py"
+      run: uv run --frozen pyright
+    eslint:
+      root: "src/frontend/"
+      glob: "*.{ts,vue,mjs}"
+      run: pnpm exec eslint --fix {staged_files}
+      stage_fixed: true
+    typecheck:
+      root: "src/frontend/"
+      glob: "*.{ts,vue,mjs}"
+      run: pnpm typecheck

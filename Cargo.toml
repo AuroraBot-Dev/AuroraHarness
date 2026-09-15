@@ -1,0 +1,17 @@
+# AuroraHarness 的 Rust 工作区。
+#
+# 三个成员构成桌面端的两层：
+#   src/rust/aurora-protocol        协议 v1 契约：版本号、信封校验、帧分类
+#   src/rust/aurora-runtime-broker  Python 运行时监管与 NDJSON 代理，不依赖 tauri
+#   src/tauri                       Tauri 2 壳：命令、事件桥、系统钥匙串接线
+#
+# 工作区根放在仓库根目录，使 cargo 从任意子目录都能解析到同一个 target/ 与
+# Cargo.lock；Tauri CLI 通过 src/tauri 的 manifest 参与同一个工作区。
+
+[workspace]
+resolver = "2"
+members = [
+    "src/rust/aurora-protocol",
+    "src/rust/aurora-runtime-broker",
+    "src/tauri",
+]

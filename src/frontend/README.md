@@ -1,68 +1,69 @@
-# Aurora Agent Frontend
+# src/frontend（前端层）
 
-Aurora 的 Nuxt 4、Vue 3、TypeScript、Naive UI、Pinia 与 Tauri 2 桌面前端。
+Aurora Agent 的界面层：Nuxt 4 + Vue 3 + TypeScript + Naive UI + Pinia，桌面场景下跑 SPA 模式，
+产物交给 Tauri 打包。
 
-## 快速开始
+## 职责边界
 
-需要 Node.js 24、pnpm 11、Rust stable 和后端要求的 Python/uv。推荐直接运行 `pnpm setup`，随后运行 `pnpm dev`。
+属于本层：页面与组件、Pinia store、协议客户端、类型定义、单元测试与 E2E。
 
-## 前后端位置
+不属于本层：
 
-默认目录结构：
+- 不管理 Python 进程——开发期的自动拉起只是一个 dev 模块（见下），桌面期由 `src/tauri` 负责
+- 不知道协议帧怎么被 Rust 代理编解码，只依赖 `app/utils/protocol.ts` 与 `runtimeClient.ts`
+- 不包含 Rust 代码，Rust 壳与代理在 `src/tauri` 与 `src/rust`
 
-```text
-GitHub/
-├─ AuroraAgentBackend/   # Python 后端
-└─ AuroraAgentFrontend/  # Vue/Tauri 前端
+```
+src/frontend/
+├── app/
+│   ├── pages/            # 路由页面
+│   ├── components/       # 组件
+│   ├── stores/           # Pinia
+│   ├── composables/      # useIpc 等
+│   ├── types/            # 协议与领域类型
+│   └── utils/            # runtimeClient / protocol / normalizers
+├── modules/dev-backend.ts# 仅开发期：自动拉起 Python 运行时
+├── tests/                # vitest
+├── e2e/                  # Playwright
+├── patches/              # pnpm 补丁（上游包缺类型导出）
+├── pnpm-workspace.yaml   # pnpm 设置：allowBuilds 与 patchedDependencies
+└── nuxt.config.ts
 ```
 
-如果后端不在同级目录，设置绝对路径：
+## 两种传输，同一份协议
+
+| 场景 | 链路 |
+|---|---|
+| 浏览器开发 | `runtimeClient` 连 WebSocket `ws://127.0.0.1:8765/ws` |
+| 桌面应用 | `useIpc` 调 Tauri 命令 `runtime_request`，由 Rust 代理走 stdio |
+
+两条链路收发的是同一套 protocol v1 信封与事件结构，因此页面代码不需要关心当前处于哪种模式。
+
+## 开发
+
+在仓库根先装依赖（`make setup`），然后：
 
 ```bash
-export AURORA_ROOT=/absolute/path/to/AuroraAgentBackend
-```
-
-## 浏览器开发
-
-首次开发可在前端目录一键安装两个仓库的依赖并生成后端 `.env`：
-
-```bash
-pnpm setup
-```
-
-也可以手动在后端根目录配置模型：
-
-```bash
-cd ../AuroraAgentBackend
-cp .env.example .env
-# 填写 AGENT_API_KEY、AGENT_BASE_URL、AGENT_MODEL
-uv sync
-```
-
-再启动前端：
-
-```bash
-cd ../AuroraAgentFrontend
-pnpm install
+# 浏览器开发：dev 模块会自动在仓库根执行 uv run aurora runtime --port 8765
 pnpm dev
-```
 
-打开 `http://127.0.0.1:3000`。Nuxt 会通过 `uv` 自动启动 Python WebSocket 运行时；如需连接其他运行时，可设置 `VITE_RUNTIME_WS`。
-
-## Tauri 桌面开发
-
-准备 Python、Node.js 20+、pnpm 11、Rust stable 与 Tauri 2 系统依赖后运行：
-
-```bash
-cd ../AuroraAgentBackend
-uv sync
-
-cd ../AuroraAgentFrontend
-pnpm install
+# 桌面开发：Tauri 壳 + 前端热更新
 pnpm tauri dev
 ```
 
-Tauri 会通过 stdio 自动启动同级 Aurora Python 后端，因此不需要另开后端终端。
+`modules/dev-backend.ts` 的默认行为是「自动拉起运行时」，仓库根由模块位置推导
+（`<repo>/src/frontend/modules` 往上三级）。想自己掌控运行时生命周期：
+
+```bash
+# 终端 A（仓库根）
+uv run aurora runtime --port 8765
+
+# 终端 B
+VITE_RUNTIME_WS=ws://127.0.0.1:8765/ws pnpm dev
+```
+
+只要设置了 `VITE_RUNTIME_WS`，dev 模块就不再自动拉起运行时。`AURORA_ROOT` 可覆盖推导出的
+仓库根，仅在目录布局特殊时才需要。
 
 ## 检查与构建
 
@@ -71,50 +72,14 @@ pnpm lint
 pnpm typecheck
 pnpm test:coverage
 pnpm test:e2e
-pnpm generate
-
-cd src-tauri
-cargo test --locked
-cargo check --locked
+pnpm generate          # 生成 .output/public，供 Tauri 打包
 ```
 
-发布桌面应用前：
+`pnpm tauri` 指向 `src/tauri/scripts/tauri.mjs`——Tauri CLI 默认找不到 `src/tauri`，
+该脚本负责把路径显式告诉它，细节见 [`docs/architecture.md`](../../docs/architecture.md)。
 
-```bash
-cd AuroraAgentFrontend
-bash build-sidecar.sh
-pnpm tauri build
-```
+## 说明
 
-当前后端会话存于内存，重启运行时后需要新建会话。工作区列表仅保存在浏览器本地；模型配置由 Python 后端 `.env` 管理。
-
-## 架构概览
-
-Nuxt SPA 负责界面与状态管理；浏览器开发模式通过 WebSocket 通信，Tauri 桌面模式由 Rust broker 通过 stdio 管理 Python sidecar。两种传输共享同一协议版本和事件结构。
-
-## 目录结构
-
-- `app/`：页面、组件、Store、协议类型和运行时客户端。
-- `modules/`：Nuxt 开发期后端启动器。
-- `src-tauri/`：桌面壳、stdio broker 与打包配置。
-- `tests/`、`e2e/`：单元测试和 Playwright 测试。
-
-## 开发指南
-
-分支、提交和 PR 规范见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。`pnpm install` 会安装 lefthook；也可运行 `pnpm lefthook install` 重新安装提交钩子。
-
-模型密钥只允许写入后端 `.env` 或系统钥匙串，绝不要提交到 Git。
-
-## 部署与发布
-
-版本遵循 SemVer。Release Please 根据 Conventional Commits 自动维护版本 PR、`CHANGELOG.md` 及前端/Tauri 版本号；版本 PR 合并产生的 `v*` tag 会构建并上传 Tauri 安装包。发布前必须完成代码签名与平台密钥配置。
-
-## 常见问题
-
-- 找不到后端：保持两个仓库同级，或设置 `AURORA_ROOT`。
-- 端口冲突：设置 `VITE_RUNTIME_WS` 后手动管理 WebSocket 后端。
-- 桌面运行时失败：检查 `uv`、sidecar 资源以及系统钥匙串权限。
-
-## 许可证
-
-本项目采用 [MIT License](LICENSE)。
+- 请使用 **pnpm 11**：`patches/` 下的补丁文件在 pnpm 12 上会因更严格的解析而安装失败。
+- 版本由 Release Please 以 `aurora-desktop` 为名管理，并同步写入
+  `src/tauri/tauri.conf.json` 与 `src/tauri/Cargo.toml`。
