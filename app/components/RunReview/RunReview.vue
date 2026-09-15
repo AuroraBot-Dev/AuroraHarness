@@ -2,6 +2,7 @@
 import { NAlert, NButton, NTag } from 'naive-ui'
 import { onRuntimeEvent, runtimeRequest } from '~/utils/runtimeClient'
 import type { RunDetail } from '~/types/workflow'
+const route = useRoute()
 const props = defineProps<{ runId: string; status: string }>()
 const detail = ref<RunDetail | null>(null)
 const error = ref('')
@@ -36,10 +37,10 @@ watch(() => props.status, (value) => { if (!['running', 'queued'].includes(value
   <div v-if="stage || detail?.agentRuns.length || error" class="run-review">
     <p v-if="stage" class="stage">{{ stage }}</p>
     <NAlert v-if="error" type="error">{{ error }}</NAlert>
-    <details v-if="detail?.agentRuns.length">
+    <details v-if="detail?.agentRuns.length" :open="!!route.hash">
       <summary>Agent 执行记录 · {{ detail.agentRuns.length }} 个阶段</summary>
-      <article v-for="item in detail.agentRuns" :key="item.id" class="execution">
-        <strong>{{ labels[item.stepKey] || item.stepKey }} · 第 {{ item.iteration + 1 }} 轮</strong>
+      <article v-for="item in detail.agentRuns" :id="`agent-run-${item.id}`" :key="item.id" class="execution">
+        <strong>{{ item.parentTaskId ? '委派任务' : labels[item.stepKey] || item.stepKey }} · 第 {{ item.iteration + 1 }} 轮</strong>
         <span>{{ item.status }} · {{ item.agentName || item.agentId }} · {{ item.modelName }}</span>
         <details><summary>阶段输出</summary><MarkdownContent :content="item.output || item.error" /></details>
       </article>

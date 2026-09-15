@@ -9,14 +9,12 @@ const models = ref<ModelConfig[]>([])
 const agents = ref<AgentConfig[]>([])
 const workflows = ref<WorkflowConfig[]>([])
 const busy = ref(false)
-const selected = reactive({ provider: '', model: '', agent: '', workflow: '' })
+const selected = reactive({ provider: '', model: '', workflow: '' })
 const provider = reactive({ name: '', base_url: 'https://api.openai.com/v1', credential_ref: 'env:AGENT_API_KEY', enabled: true })
 const secret = ref('')
 const model = reactive({ name: '', provider_id: '', model_name: '', context_budget_tokens: 8000, enabled: true })
-const imageInput = ref(false)
+const modelType = ref<'text' | 'multimodal' | 'embedding'>('text')
 const temperature = ref(0)
-const agent = reactive({ name: '', instructions: '', model_config_id: '', enabled: true })
-const allowedTools = ref('*')
 const workflow = reactive({ name: '', kind: 'single', code_agent_id: '', review_agent_id: '', max_revisions: 2, enabled: true })
 const defaultWorkflow = ref<string | null>(null)
 const options = (items: { id: string; name: string }[]) => items.map((item) => ({ label: item.name, value: item.id }))
@@ -42,13 +40,7 @@ function editModel(id: string | null) {
   selected.model = id || ''
   const item = models.value.find((entry) => entry.id === id)
   Object.assign(model, { name: item?.name || '', provider_id: item?.providerId || '', model_name: item?.modelName || '', context_budget_tokens: item?.contextBudgetTokens || 8000, enabled: item ? !!item.enabled : true })
-  imageInput.value = !!item?.inputTypes.includes('image'); temperature.value = Number(item?.parameters.temperature ?? 0)
-}
-function editAgent(id: string | null) {
-  selected.agent = id || ''
-  const item = agents.value.find((entry) => entry.id === id)
-  Object.assign(agent, { name: item?.name || '', instructions: item?.instructions || '', model_config_id: item?.modelConfigId || '', enabled: item ? !!item.enabled : true })
-  allowedTools.value = item?.allowedTools.join(', ') ?? '*'
+  modelType.value = item?.modelType ?? 'text'; temperature.value = Number(item?.parameters.temperature ?? 0)
 }
 function editWorkflow(id: string | null) {
   selected.workflow = id || ''
@@ -58,7 +50,7 @@ function editWorkflow(id: string | null) {
 async function save(kind: keyof typeof selected) {
   busy.value = true
   try {
-    const data = kind === 'provider' ? { ...provider } : kind === 'model' ? { ...model, parameters: { temperature: temperature.value }, input_types: imageInput.value ? ['text', 'image'] : ['text'] } : kind === 'agent' ? { ...agent, allowed_tools: allowedTools.value.split(',').map((item) => item.trim()).filter(Boolean) } : { ...workflow }
+    const data = kind === 'provider' ? { ...provider } : kind === 'model' ? { ...model, parameters: { temperature: temperature.value }, model_type: modelType.value } : { ...workflow }
     const result = await runtimeRequest<{ id: string }>(`${kind}.${selected[kind] ? 'update' : 'create'}`, { id: selected[kind] || undefined, data })
     selected[kind] = result.id
     if (kind === 'provider' && secret.value) {
@@ -77,6 +69,7 @@ async function setDefault(value: string) {
 
 <template>
   <NCard title="模型与 Agent 协作">
+    <NuxtLink to="/agents">管理 Agent →</NuxtLink>
     <NFormItem label="新会话默认流程"><NSelect :value="defaultWorkflow" :options="options(workflows.filter((item) => item.enabled))" @update:value="setDefault" /></NFormItem>
     <NCollapse>
       <NCollapseItem title="供应商与凭据" name="provider">
@@ -93,24 +86,17 @@ async function setDefault(value: string) {
         <NFormItem label="供应商"><NSelect v-model:value="model.provider_id" :options="options(providers)" /></NFormItem>
         <NFormItem label="模型名称"><NInput v-model:value="model.model_name" /></NFormItem>
         <NFormItem label="上下文预算"><NInputNumber v-model:value="model.context_budget_tokens" :min="1" /></NFormItem>
+        <NFormItem label="模型类型"><NSelect v-model:value="modelType" :options="[{ label: '文本', value: 'text' }, { label: '多模态（文本与图片）', value: 'multimodal' }, { label: '向量（暂不支持调用）', value: 'embedding' }]" /></NFormItem>
         <NFormItem label="Temperature"><NInputNumber v-model:value="temperature" :min="0" :max="2" :step="0.1" /></NFormItem>
-        <div class="actions"><NCheckbox v-model:checked="imageInput">支持图片输入</NCheckbox><NCheckbox v-model:checked="model.enabled">启用</NCheckbox><NButton :loading="busy" @click="save('model')">保存模型</NButton></div>
-      </NCollapseItem>
-      <NCollapseItem title="Agent 角色" name="agent">
-        <NFormItem label="编辑已有 Agent；清空后新建"><NSelect clearable :value="selected.agent || null" :options="options(agents)" @update:value="editAgent" /></NFormItem>
-        <NFormItem label="角色名称"><NInput v-model:value="agent.name" /></NFormItem>
-        <NFormItem label="使用模型"><NSelect v-model:value="agent.model_config_id" :options="options(models)" /></NFormItem>
-        <NFormItem label="职责与指令"><NInput v-model:value="agent.instructions" type="textarea" :autosize="{ minRows: 3, maxRows: 10 }" /></NFormItem>
-        <NFormItem label="允许工具（逗号分隔，* 表示全部，留空禁用）"><NInput v-model:value="allowedTools" /></NFormItem>
-        <div class="actions"><NCheckbox v-model:checked="agent.enabled">启用</NCheckbox><NButton :loading="busy" @click="save('agent')">保存 Agent</NButton></div>
+        <div class="actions"><NCheckbox v-model:checked="model.enabled">启用</NCheckbox><NButton :loading="busy" @click="save('model')">保存模型</NButton></div>
       </NCollapseItem>
       <NCollapseItem title="预设协作流程" name="workflow">
         <NFormItem label="编辑已有流程；清空后新建"><NSelect clearable :value="selected.workflow || null" :options="options(workflows)" @update:value="editWorkflow" /></NFormItem>
         <NFormItem label="流程名称"><NInput v-model:value="workflow.name" /></NFormItem>
         <NFormItem label="流程类型"><NSelect v-model:value="workflow.kind" :options="[{ label: '单 Agent', value: 'single' }, { label: '前端编写与视觉审查', value: 'frontend-review' }]" /></NFormItem>
-        <NFormItem label="编写 Agent"><NSelect v-model:value="workflow.code_agent_id" :options="options(agents)" /></NFormItem>
+        <NFormItem label="编写 Agent"><NSelect v-model:value="workflow.code_agent_id" :options="options(agents.filter((a) => models.find((m) => m.id === a.modelConfigId)?.modelType !== 'embedding'))" /></NFormItem>
         <template v-if="workflow.kind === 'frontend-review'">
-          <NFormItem label="视觉审查 Agent"><NSelect v-model:value="workflow.review_agent_id" :options="options(agents)" /></NFormItem>
+          <NFormItem label="视觉审查 Agent"><NSelect v-model:value="workflow.review_agent_id" :options="options(agents.filter((a) => models.find((m) => m.id === a.modelConfigId)?.modelType !== 'embedding'))" /></NFormItem>
           <NFormItem label="最多自动返修轮次"><NInputNumber v-model:value="workflow.max_revisions" :min="0" :max="2" /></NFormItem>
         </template>
         <div class="actions"><NCheckbox v-model:checked="workflow.enabled">启用</NCheckbox><NButton :loading="busy" @click="save('workflow')">保存流程</NButton></div>

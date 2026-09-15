@@ -137,6 +137,9 @@ async function handleSessionMenu(key: string, session: SessionRecord) {
         <NButton quaternary class="nav-button" aria-label="新对话" @click="createConversation"><template #icon><NIcon :component="Edit" :size="18" /></template><span v-if="!collapsed" class="nav-label">新对话</span><NIcon v-if="!collapsed" class="nav-end" :component="Plus" :size="15" /></NButton>
       </template>新对话</NTooltip>
       <NTooltip placement="right" :disabled="!collapsed"><template #trigger>
+        <NButton quaternary class="nav-button" :class="{ 'agent-nav-active': route.path === '/agents' }" aria-label="Agent" @click="navigateTo('/agents')"><template #icon><NIcon :component="Puzzle" :size="18" /></template><span v-if="!collapsed" class="nav-label">Agent</span></NButton>
+      </template>Agent</NTooltip>
+      <NTooltip placement="right" :disabled="!collapsed"><template #trigger>
         <NButton quaternary class="nav-button" aria-label="Git" @click="showUnavailable('Git')"><template #icon><NIcon :component="GitPullRequest" :size="18" /></template><span v-if="!collapsed" class="nav-label">Git</span></NButton>
       </template>Git · 暂未开发</NTooltip>
       <NTooltip placement="right" :disabled="!collapsed"><template #trigger>
@@ -206,6 +209,7 @@ async function handleSessionMenu(key: string, session: SessionRecord) {
 .primary-nav { display: grid; gap: 2px; padding: 4px 8px 13px; }
 .nav-button { width: 100%; height: 34px; justify-content: flex-start; color: var(--text); }
 .primary-nav :deep(.n-button__content) { width: 100%; }
+.agent-nav-active { background: var(--surface-hover); }
 .nav-label { flex: 1; text-align: left; }
 .nav-end { flex: 0 0 auto; color: var(--text-muted); }
 
