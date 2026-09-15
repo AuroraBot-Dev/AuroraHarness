@@ -156,7 +156,9 @@ def test_registry_types_tests_and_config_invalidation(tmp_path, monkeypatch):
 def test_registry_migrates_existing_agents(tmp_path):
     path = tmp_path / "old.db"
     connection = sqlite3.connect(path)
-    sql = Path("src/aurora/agent/store/migrations/001_initial.sql").read_text()
+    sql = (
+        Path(__file__).parents[1] / "src/aurora/agent/store/migrations/001_initial.sql"
+    ).read_text()
     connection.executescript(sql)
     connection.execute(
         "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT)"

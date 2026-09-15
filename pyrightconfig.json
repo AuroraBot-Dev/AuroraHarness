@@ -1,0 +1,10 @@
+{
+  "include": ["src/agent/src", "src/cli/src"],
+  "exclude": ["**/node_modules", "**/__pycache__", "**/.venv"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": false,
+  "reportMissingModuleSource": false
+}

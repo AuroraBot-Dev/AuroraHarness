@@ -1,0 +1,48 @@
+# AuroraHarness 顶层 Python 工作区定义。
+#
+# 本文件不含 [project]，是 uv 的虚拟工作区根：仓库的 Python 侧分为两个可独立安装的分布
+#   src/agent -> aurora-agent   agent 层：运行时 / 图 / 工具 / 沙箱 / 存储 / 传输协议
+#   src/cli   -> aurora-cli     cli 层：参数解析与命令分发，依赖 aurora-agent
+# 两者共用一份 uv.lock 与 .venv，代码质量工具链（ruff / pytest / coverage）也集中在这里。
+
+[tool.uv.workspace]
+members = ["src/agent", "src/cli"]
+
+# cli 层依赖 agent 层：同一工作区内解析为本地包，不查索引。
+[tool.uv.sources]
+aurora-agent = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pip-audit>=2.8,<3",
+    "pre-commit>=4,<5",
+    "pyright>=1.1.400",
+    "pytest>=9.1.1",
+    "pytest-cov>=6,<8",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# 两个分布的源码根，Ruff 借此把 aurora 判定为第一方模块。
+src = ["src/agent/src", "src/cli/src"]
+# 前端与 Tauri 层不受 Ruff 管辖。
+extend-exclude = ["src/frontend", "src/tauri"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["src/agent/tests", "src/cli/tests"]
+addopts = "--cov=aurora --cov-report=term-missing --cov-fail-under=60"
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+skip_covered = true
+show_missing = true

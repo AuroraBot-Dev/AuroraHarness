@@ -15,7 +15,6 @@ from aurora.agent.core import Effort, NoClarifier
 from aurora.agent.runtime import AgentRuntime, validate_workspace
 from aurora.agent.sandbox import Sandbox, UnsafeSubprocessExecutor
 from aurora.agent.transport import RuntimeApi, serve_ndjson, serve_websocket
-from aurora.cli.main import build_parser
 from aurora.text import sanitize_text
 
 
@@ -336,8 +335,3 @@ def test_wire_stream_resumes_after_approval(tmp_path):
     assert any(frame.get("type") == "run.resumed" for frame in resumed)
     assert any(frame.get("type") == "message.delta" for frame in resumed)
     assert (tmp_path / "stream.txt").read_text(encoding="utf-8") == "ok"
-
-
-def test_runtime_command_is_registered():
-    args = build_parser().parse_args(["runtime"])
-    assert args.command == "runtime"

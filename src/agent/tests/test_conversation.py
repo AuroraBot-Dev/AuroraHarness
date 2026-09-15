@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage
-from rich.console import Console
 
-from aurora.agent.conversation import ConversationSession, SessionReply
+from aurora.agent.conversation import ConversationSession
 from aurora.agent.core import Effort
-from aurora.cli.commands.serve import _render_reply
-from aurora.cli.main import build_parser
 
 
 class FakeLlm:
@@ -63,14 +60,6 @@ def test_model_role_prefix_is_removed():
     assert session.handle("你好").text == "这是正文"
 
 
-def test_console_uses_agent_reply_label():
-    console = Console(record=True, force_terminal=False)
-    _render_reply(console, SessionReply(text="这是正文"))
-    output = console.export_text()
-    assert "agent>> 这是正文" in output
-    assert "aurora>" not in output
-
-
 def test_plan_only_builds_tasks():
     session, _, planner, runs = make_session()
     reply = session.handle("/plan 检查项目")
@@ -109,11 +98,3 @@ def test_missing_arguments_return_usage():
     assert session.handle("/say").text.startswith("用法")
     assert session.handle("/plan").text.startswith("用法")
     assert session.handle("/run").text.startswith("用法")
-
-
-def test_serve_command_is_registered():
-    args = build_parser().parse_args(["serve", "--mode", "read-only", "--approve", "never"])
-    assert args.command == "serve"
-    assert args.sandbox_dir == "."
-    assert args.mode == "read-only"
-    assert args.approve == "never"

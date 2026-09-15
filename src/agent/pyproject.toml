@@ -1,7 +1,7 @@
 [project]
-name = "auroraapp"
+name = "aurora-agent"
 version = "0.2.0"
-description = "Aurora Agent runtime backend"
+description = "Aurora Agent 运行时后端（agent 层：运行时 / 图 / 工具 / 沙箱 / 存储 / 传输）"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13,<3.15"
@@ -20,47 +20,14 @@ dependencies = [
     "websockets>=16,<17",
 ]
 
-[project.scripts]
-aurora = "aurora.cli:main"
-
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aurora*"]
+include = ["aurora", "aurora.agent*", "aurora.eval*"]
 
 [tool.setuptools.package-data]
 "aurora.agent.mcp.packages" = ["*/package.yaml"]
 "aurora.agent.store" = ["migrations/*.sql"]
-
-[dependency-groups]
-dev = [
-    "pip-audit>=2.8,<3",
-    "pre-commit>=4,<5",
-    "pyright>=1.1.400",
-    "pytest>=9.1.1",
-    "pytest-cov>=6,<8",
-    "ruff>=0.8",
-]
-
-[tool.ruff]
-line-length = 100
-target-version = "py313"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "W", "UP"]
-
-[tool.ruff.format]
-quote-style = "double"
-
-[tool.pytest.ini_options]
-addopts = "--cov=aurora --cov-report=term-missing --cov-fail-under=60"
-
-[tool.coverage.run]
-branch = true
-
-[tool.coverage.report]
-skip_covered = true
-show_missing = true

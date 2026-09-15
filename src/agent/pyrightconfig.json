@@ -1,7 +1,0 @@
-{
-  "include": ["src"],
-  "pythonVersion": "3.13",
-  "typeCheckingMode": "basic",
-  "reportMissingTypeStubs": false,
-  "reportMissingModuleSource": false
-}
