@@ -1,0 +1,50 @@
+{
+  "name": "demo-desktop",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "generate": "nuxt generate",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "preview": "nuxt preview",
+    "typecheck": "nuxt typecheck",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:watch": "vitest",
+    "postinstall": "nuxt prepare",
+    "tauri": "tauri",
+    "prepare": "lefthook install"
+  },
+  "dependencies": {
+    "@pinia/nuxt": "^1.0.2",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.4.2",
+    "@vicons/tabler": "^0.13.0",
+    "dompurify": "^3.4.14",
+    "markdown-it": "^14.1.0",
+    "naive-ui": "^2.45.2",
+    "nuxt": "^4.5.2",
+    "pinia": "^4.0.3",
+    "vue": "^3.5.41"
+  },
+  "devDependencies": {
+    "@nuxt/eslint-config": "^1.17.0",
+    "@playwright/test": "^1.62.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/markdown-it": "^14.2.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "@vue/test-utils": "^2.4.11",
+    "eslint": "^10.9.1",
+    "happy-dom": "^20.11.6",
+    "lefthook": "^2.1.10",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.11",
+    "vue-tsc": "^3.3.11"
+  }
+}

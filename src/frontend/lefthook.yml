@@ -1,0 +1,9 @@
+pre-commit:
+  parallel: true
+  commands:
+    eslint:
+      glob: "*.{ts,vue,mjs}"
+      run: pnpm eslint --fix {staged_files}
+      stage_fixed: true
+    typecheck:
+      run: pnpm typecheck

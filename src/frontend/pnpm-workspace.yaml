@@ -1,0 +1,11 @@
+# pnpm 设置（pnpm 11+ 不再读 package.json 的 pnpm 字段）。
+# allowBuilds：依赖名 → 是否允许其运行安装脚本。
+allowBuilds:
+  esbuild: true
+  lefthook: true
+  unrs-resolver: true
+# 上游包在当前镜像中缺少仅导出类型的 JS 空模块，补丁保证全新安装可构建。
+patchedDependencies:
+  '@volar/language-core@2.4.28': patches/volar-language-core-2.4.28.patch
+  'css-render@0.15.14': patches/css-render-0.15.14.patch
+  'expect-type@1.4.0': patches/expect-type-1.4.0.patch

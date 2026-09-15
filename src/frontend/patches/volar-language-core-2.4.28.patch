@@ -1,0 +1,7 @@
+diff --git a/lib/types.js b/lib/types.js
+new file mode 100644
+--- /dev/null
++++ b/lib/types.js
+@@ -0,0 +1,2 @@
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });

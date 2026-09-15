@@ -1,0 +1,14 @@
+diff --git a/dist/branding.js b/dist/branding.js
+new file mode 100644
+--- /dev/null
++++ b/dist/branding.js
+@@ -0,0 +1,2 @@
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
+diff --git a/dist/overloads.js b/dist/overloads.js
+new file mode 100644
+--- /dev/null
++++ b/dist/overloads.js
+@@ -0,0 +1,2 @@
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });

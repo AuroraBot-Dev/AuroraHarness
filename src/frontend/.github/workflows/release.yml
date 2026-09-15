@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: AuroraAgentFrontend
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: AuroraAgentFrontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/checkout@v7
+        with:
+          repository: haha-ha-cuo/AuroraAgentBackend
+          path: AuroraAgentBackend
+      - run: pnpm install --frozen-lockfile
+        working-directory: AuroraAgentFrontend
+      - run: bash build-sidecar.sh
+        working-directory: AuroraAgentFrontend
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: AuroraAgentFrontend
+          tagName: v__VERSION__
+          releaseName: Aurora Agent v__VERSION__
+          releaseDraft: false
+          prerelease: false

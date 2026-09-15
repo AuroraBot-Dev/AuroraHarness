@@ -1,0 +1,4 @@
+# 固定 Rust 工具链：进入仓库后 cargo/rustc 自动使用 stable。
+# 需要更精确复现时，可把 channel 改为具体版本（如 "1.89.0"）。
+[toolchain]
+channel = "stable"
