@@ -46,6 +46,7 @@ src/tauri/resources/sidecar/*
 !src/tauri/resources/sidecar/.gitkeep
 
 # ==================== 环境变量与本地运行数据 ====================
+/.aurora/
 .env
 .env.*
 !.env.example

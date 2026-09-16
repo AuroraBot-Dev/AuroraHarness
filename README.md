@@ -59,6 +59,10 @@ cp src/agent/.env.example src/agent/.env
 
 ### 浏览器开发
 
+数据库默认保存在仓库根目录的 `.aurora/aurora.db`，浏览器与桌面开发共用，
+该目录已被 Git 忽略。可通过 `AURORA_DATABASE_PATH` 覆盖路径；独立安装或打包运行时
+若无法定位源码仓库，则使用当前工作目录下的 `.aurora/aurora.db`。
+
 ```bash
 node scripts/tasks.mjs dev-web   # 只起前端；dev 模块会自动拉起 Python 运行时
 ```

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import sys
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -38,13 +37,15 @@ def database_path() -> Path:
     """确定各入口共用的数据库路径。"""
     if value := os.getenv("AURORA_DATABASE_PATH"):
         return Path(value).expanduser()
-    if sys.platform == "darwin":
-        root = Path.home() / "Library" / "Application Support"
-    elif sys.platform == "win32":
-        root = Path(os.getenv("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
-    else:
-        root = Path(os.getenv("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
-    return root / "Aurora" / "aurora.db"
+    root = next(
+        (
+            parent
+            for parent in Path(__file__).resolve().parents
+            if (parent / "uv.lock").is_file() and (parent / "Cargo.toml").is_file()
+        ),
+        Path.cwd(),
+    )
+    return root / ".aurora" / "aurora.db"
 
 
 class Database:
