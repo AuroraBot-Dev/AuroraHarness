@@ -9,7 +9,8 @@ from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send, interrupt
 
-from ...logging import get_logger
+from aurora.common.logging import get_logger
+
 from ..safety.gate import ConfirmationGate, DenyApprover
 from ..tools.base import Tool
 from .planner import Clarifier, NoClarifier, Planner

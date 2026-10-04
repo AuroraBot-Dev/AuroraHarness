@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from aurora.agent.preview import BrowserCapture, validate_preview
+from aurora.agent.preview.browser import BrowserCapture, validate_preview
 from aurora.agent.sandbox import Sandbox, UnsafeSubprocessExecutor
 
 

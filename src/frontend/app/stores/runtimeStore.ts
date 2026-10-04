@@ -8,7 +8,7 @@ import { PROTOCOL_VERSION_TEXT } from '~/utils/protocol'
 
 let initialized: Promise<void> | null = null
 let unsubscribe: (() => void) | null = null
-const streamBuffers = new Map<string, { sessionId: string; pending: string; finalText?: string; timer?: ReturnType<typeof setTimeout> }>()
+const streamBuffers = new Map<string, { sessionId: string; pending: string; timer?: ReturnType<typeof setTimeout> }>()
 type JsonRecord = Record<string, unknown>
 interface RuntimeUpdate {
   sessionId: string
@@ -35,32 +35,23 @@ function flushStreamBuffer(messageId: string) {
   if (!buffer) return
   const message = useSessionStore().getSession(buffer.sessionId)?.messages.find((item) => item.id === messageId)
   if (!message) { streamBuffers.delete(messageId); return }
-  const delta = buffer.pending.slice(0, 8)
-  buffer.pending = buffer.pending.slice(delta.length)
-  message.content += delta
-  if (buffer.pending) {
-    buffer.timer = setTimeout(() => flushStreamBuffer(messageId), 16)
-  } else if (buffer.finalText !== undefined) {
-    message.content = buffer.finalText
-    message.status = 'completed'
-    streamBuffers.delete(messageId)
-  } else {
-    buffer.timer = undefined
-  }
+  message.content += buffer.pending
+  streamBuffers.delete(messageId)
 }
 
 function enqueueStreamDelta(sessionId: string, messageId: string, delta: string) {
   const buffer = streamBuffers.get(messageId) ?? { sessionId, pending: '' }
   buffer.pending += delta
   streamBuffers.set(messageId, buffer)
-  if (!buffer.timer) flushStreamBuffer(messageId)
+  if (!buffer.timer) buffer.timer = setTimeout(() => flushStreamBuffer(messageId), 16)
 }
 
 function completeStreamMessage(sessionId: string, messageId: string, content: string) {
-  const buffer = streamBuffers.get(messageId) ?? { sessionId, pending: '' }
-  buffer.finalText = content
-  streamBuffers.set(messageId, buffer)
-  if (!buffer.timer) flushStreamBuffer(messageId)
+  const buffer = streamBuffers.get(messageId)
+  if (buffer?.timer) clearTimeout(buffer.timer)
+  streamBuffers.delete(messageId)
+  const message = useSessionStore().getSession(sessionId)?.messages.find((item) => item.id === messageId)
+  if (message) { message.content = content; message.status = 'completed' }
 }
 
 export const useRuntimeStore = defineStore('runtime', {
@@ -68,6 +59,7 @@ export const useRuntimeStore = defineStore('runtime', {
     connectionStatus: 'disconnected' as RuntimeInfo['status'],
     info: { status: 'disconnected', mode: 'stdio/websocket', version: PROTOCOL_VERSION_TEXT, databasePath: '', activeRuns: 0, capabilities: [] } as RuntimeInfo,
     approvals: [] as ApprovalRequest[], lastError: '',
+    pendingInputs: {} as Record<string, { accepted: boolean }>,
     packages: [] as McpPackage[], connections: [] as McpConnection[], serverConnections: [] as McpConnection[], pluginErrors: {} as Record<string, string>,
   }),
   getters: {
@@ -137,21 +129,34 @@ export const useRuntimeStore = defineStore('runtime', {
     async resumeInput(id: string, response: unknown) {
       const request = this.approvals.find((item) => item.id === id)
       if (!request) throw new Error('待处理请求不存在')
+      if (request.status !== 'pending' || this.pendingInputs[id]) return
+      const session = useSessionStore().getSession(request.sessionId)
+      const run = session?.runs.find((item) => item.id === request.runId)
+      this.pendingInputs[id] = { accepted: false }
+      request.status = response === false || (isRecord(response) && response.approved === false) ? 'rejected' : 'approved'
+      if (session) session.status = 'running'
+      if (run) run.status = 'running'
       try {
         const update = await runtimeRequest<RuntimeUpdate>('run.resume', {
           sessionId: request.sessionId, runId: request.runId,
           interruptId: request.interruptId || request.id, response,
         })
-        request.status = response === false || (isRecord(response) && response.approved === false) ? 'rejected' : 'approved'
         this.applyUpdate(update)
-        await useSessionStore().load(request.sessionId)
       } catch (error) {
-        const session = useSessionStore().getSession(request.sessionId)
-        const run = session?.runs.find((item) => item.id === request.runId)
-        if (session) session.status = 'failed'
-        if (run) { run.status = 'failed'; run.error = error instanceof Error ? error.message : String(error); run.updatedAt = new Date().toISOString() }
+        if (!this.pendingInputs[id]?.accepted) {
+          request.status = 'pending'
+          if (session) session.status = 'waiting'
+          if (run) run.status = 'waiting'
+        } else {
+          if (session?.status === 'running') session.status = 'failed'
+          if (run?.status === 'running') {
+            run.status = 'failed'
+            run.error = error instanceof Error ? error.message : String(error)
+          }
+        }
         throw error
-      }
+      } finally { Reflect.deleteProperty(this.pendingInputs, id) }
+      await useSessionStore().load(request.sessionId)
     },
     async resolveApproval(id: string, approved: boolean) { await this.resumeInput(id, { approved }) },
     applyUpdate(update: RuntimeUpdate) {
@@ -208,6 +213,17 @@ export const useRuntimeStore = defineStore('runtime', {
       const sessionId = String(event.session_id ?? payload.sessionId ?? payload.session_id ?? '')
       const runId = String(event.run_id ?? payload.runId ?? payload.run_id ?? '')
       const session = useSessionStore().getSession(sessionId)
+      if (event.type === 'run.resumed') {
+        for (const request of this.approvals) {
+          const pending = this.pendingInputs[request.id]
+          if (pending && request.sessionId === sessionId && request.runId === runId) pending.accepted = true
+        }
+        if (session) {
+          session.status = 'running'
+          const run = session.runs.find((item) => item.id === runId)
+          if (run) run.status = 'running'
+        }
+      }
       if (session && event.type === 'run.started') {
         const now = event.occurred_at || new Date().toISOString()
         const userMessage = [...session.messages].reverse().find((item) => item.role === 'user' && !item.runId)
@@ -246,7 +262,7 @@ export const useRuntimeStore = defineStore('runtime', {
           session.messages.push(message)
         }
         if (event.type === 'message.delta') enqueueStreamDelta(sessionId, message.id, String(payload.delta ?? ''))
-        if (event.type === 'message.completed') completeStreamMessage(sessionId, message.id, String(payload.content ?? message.content))
+        if (event.type === 'message.completed') completeStreamMessage(sessionId, message.id, String(payload.content ?? message.content + (streamBuffers.get(message.id)?.pending ?? '')))
       }
     },
     async loadMcp() {

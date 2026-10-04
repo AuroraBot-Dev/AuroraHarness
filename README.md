@@ -149,12 +149,27 @@ src/frontend/     pnpm 包                                     → pnpm-lock.yam
 | `src/frontend/package.json` | `aurora-frontend` | 前端包 |
 | `src/tauri/Cargo.toml` + `tauri.conf.json` | `aurora-desktop` | **桌面应用的产品版本** |
 
-需要出包时在本机执行：
+需要桌面安装包时，在仓库根执行（Windows 默认出 NSIS 的 `.exe`）：
 
 ```bash
-node scripts/tasks.mjs build-desktop      # 桌面安装包（Windows 默认出 NSIS 的 .exe）
-uv build --all-packages --out-dir dist    # 两个 Python 分布的 wheel/sdist
+node scripts/tasks.mjs build-desktop
 ```
+
+需要两个 Python 分布的 wheel/sdist 时，在仓库根执行：
+
+```bash
+uv build --all-packages --out-dir dist
+```
+
+复制命令时不要附带行尾说明：交互式 zsh 未启用 `INTERACTIVE_COMMENTS` 时，会把 `#` 及其后的文字当作命令参数。
+
+macOS 若已经编译成功，仅在 `bundle_dmg.sh` 阶段失败，可以在 `src/frontend` 下重试打包并显示详细日志，无须重新编译：
+
+```bash
+pnpm tauri bundle --bundles dmg --verbose
+```
+
+成功的 DMG 位于 `target/release/bundle/dmg/`。若重试仍失败，应查看汇总错误之前的 `hdiutil` 或 AppleScript 错误；仅凭 `failed to run bundle_dmg.sh` 无法判断具体原因。
 
 ## 许可证
 

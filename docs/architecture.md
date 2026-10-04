@@ -49,7 +49,7 @@ src/frontend ──(Tauri IPC)──▶ src/tauri ──▶ src/rust ──(stdi
 
 协议版本号在**三处**必须保持一致，改动时三处同改：
 
-- `src/agent/src/aurora/protocol.py` → `PROTOCOL_VERSION`
+- `src/agent/src/aurora/common/protocol.py` → `PROTOCOL_VERSION`
 - `src/rust/aurora-protocol/src/lib.rs` → `PROTOCOL_VERSION`
 - `src/frontend/app/utils/protocol.ts`
 
@@ -140,7 +140,7 @@ lefthook.yml       唯一的 Git 钩子来源（git 根）
 诚实记录当前状态，避免把它们当成「已解决」：
 
 - 协议版本号仍是三处手写常量，尚未做生成或校验（见 `docs/adr/001-protocol-version.md`）。
-- `preview.py` 等待本机预览服务就绪的时限**硬编码为 20 秒**，且不可配置。实测在 macOS CI 上
+- `preview/browser.py` 等待本机预览服务就绪的时限**硬编码为 20 秒**，且不可配置。实测在 macOS CI 上
   满载跑测试时，同一台机器上 `python -m http.server` 的启动会超过这个时限（空闲时约 6 秒），
   表现为「预览服务启动超时」；真实用户的 dev server 冷启动也可能更久。建议改成可配置项并给出
   更宽松的默认值。

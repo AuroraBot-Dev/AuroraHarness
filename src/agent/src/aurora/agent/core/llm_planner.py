@@ -9,9 +9,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field, field_validator
 
-from aurora.text import sanitize_text
+from aurora.common.logging import get_logger
+from aurora.common.text import sanitize_text
 
-from ...logging import get_logger
 from ..tools.base import Tool, format_tools_for_llm
 from .planner import ClarificationDecision
 from .state import Clarification, Effort, Task

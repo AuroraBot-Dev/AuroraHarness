@@ -8,11 +8,11 @@ from datetime import UTC, datetime
 from typing import Any, TextIO
 from uuid import uuid4
 
-from aurora.protocol import PROTOCOL_VERSION
-from aurora.text import sanitize_text, sanitize_value
+from aurora.agent.orchestration.runtime import AgentRuntime, RunUpdate, validate_workspace
+from aurora.common.protocol import PROTOCOL_VERSION
+from aurora.common.text import sanitize_text, sanitize_value
 
 from ..mcp import McpClientError, McpServerConfig
-from ..runtime import AgentRuntime, RunUpdate, validate_workspace
 from ..sandbox import SandboxMode
 from ..store import GitRepository, GitView
 

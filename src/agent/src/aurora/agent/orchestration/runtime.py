@@ -12,25 +12,24 @@ from uuid import uuid4
 
 from langgraph.types import Command
 
-from aurora.agent.store.model import ConversationSession, Project
-from aurora.text import sanitize_text, sanitize_value
-
-from .core import LLMClarifier, LLMPlanner
-from .core.state import DelegationState
-from .mcp import (
+from aurora.agent.core import LLMClarifier, LLMPlanner
+from aurora.agent.core.state import DelegationState
+from aurora.agent.mcp import (
     McpPackage,
     McpPackageRegistry,
     McpServerConfig,
     StdioMcpClient,
     build_mcp_tools,
 )
-from .model_access import build_llm
-from .sandbox import Sandbox, SandboxMode, create_sandbox
-from .store import GitRepository, GitView
-from .tools import Tool
+from aurora.agent.model_access import build_llm
+from aurora.agent.sandbox import Sandbox, SandboxMode, create_sandbox
+from aurora.agent.store import GitRepository, GitView
+from aurora.agent.store.model import ConversationSession, Project
+from aurora.agent.tools import Tool
+from aurora.common.text import sanitize_text, sanitize_value
 
 if TYPE_CHECKING:
-    from .workflows import WorkflowSession
+    from aurora.agent.orchestration.workflows import WorkflowSession
 
 
 @dataclass(frozen=True)
@@ -269,9 +268,9 @@ class AgentRuntime:
         configured_llm_factory=None,
         capture=None,
     ) -> None:
-        from .preview import BrowserCapture
-        from .store.database import Database
-        from .store.records import Records
+        from aurora.agent.preview.browser import BrowserCapture
+        from aurora.agent.store.database import Database
+        from aurora.agent.store.records import Records
 
         self._custom_llm = llm_factory is not build_llm
         self._configured_llm_factory = configured_llm_factory
@@ -308,7 +307,7 @@ class AgentRuntime:
         title: str = "新对话",
     ) -> WorkflowSession:
         """为指定工作区创建独立 Agent 会话。"""
-        from .store.database import now, uid
+        from aurora.agent.store.database import now, uid
 
         if approval_mode not in {"interactive", "always", "never"}:
             raise ValueError("未知审批策略")
@@ -338,7 +337,7 @@ class AgentRuntime:
         """按需重建持久会话的本地资源。"""
         with self._session_lock:
             if session_id not in self._sessions:
-                from .workflows import WorkflowSession
+                from aurora.agent.orchestration.workflows import WorkflowSession
 
                 record = self.records.get(ConversationSession, session_id)
                 project = self.records.get(Project, record["project_id"])

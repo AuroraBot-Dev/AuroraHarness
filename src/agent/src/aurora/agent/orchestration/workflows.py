@@ -15,24 +15,25 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy import update as orm_update
 
-from aurora.agent.store.model import ConversationSession, Project, ReviewArtifact
-
-from .conversation import SYSTEM_PROMPT, _message_text
-from .core import build_delegation_graph
-from .model_access.config import build_configured_llm
-from .preview import validate_preview
-from .runtime import AgentSession, RuntimeInterrupt, RunUpdate
-from .safety import build_gate
-from .store.database import dumps, now, uid
-from .store.model import (
+from aurora.agent.conversation.session import SYSTEM_PROMPT, _message_text
+from aurora.agent.core import build_delegation_graph
+from aurora.agent.model_access.config import build_configured_llm
+from aurora.agent.orchestration.runtime import AgentSession, RuntimeInterrupt, RunUpdate
+from aurora.agent.preview.browser import validate_preview
+from aurora.agent.safety import build_gate
+from aurora.agent.store.database import dumps, now, uid
+from aurora.agent.store.model import (
     AgentRun,
+    ConversationSession,
     Interaction,
+    Project,
     Review,
+    ReviewArtifact,
     ReviewFinding,
     Run,
     Task,
 )
-from .store.records import decode
+from aurora.agent.store.records import decode
 
 
 class Finding(BaseModel):
@@ -89,7 +90,7 @@ class WorkflowSession(AgentSession):
             self.record["sandbox_mode"],
             self.record["approval_mode"],
         )
-        from .registry import AgentRegistry
+        from aurora.agent.capability.registry import AgentRegistry
 
         result["agents"] = AgentRegistry(self.runtime).snapshot()
         result["preview"] = self.records.get(Project, self.record["project_id"])["preview"]
@@ -105,8 +106,8 @@ class WorkflowSession(AgentSession):
 
     def _tools(self, agent):
         """按角色权限过滤当前运行时工具。"""
-        from .store import build_git_tools
-        from .tools import build_sandbox_tools, get_available_tools
+        from aurora.agent.store import build_git_tools
+        from aurora.agent.tools import build_sandbox_tools, get_available_tools
 
         tools = get_available_tools()
         tools.update(build_sandbox_tools(self.sandbox))
@@ -118,7 +119,7 @@ class WorkflowSession(AgentSession):
 
     def start(self, goal, on_progress=None, *, workflow_id=None, request_key=None, mode="run"):
         """原子登记一轮请求并开始执行，重复请求返回原记录。"""
-        from aurora.text import sanitize_text
+        from aurora.common.text import sanitize_text
 
         goal = sanitize_text(goal).strip()
         if not goal or mode not in {"run", "say", "plan"}:
@@ -541,7 +542,7 @@ class WorkflowSession(AgentSession):
             state["code_agent_run_id"] = agent_run
             llm = self._model(config)
             tools = self._tools(config["agent"])
-            from .registry import registry_tools
+            from aurora.agent.capability.registry import registry_tools
 
             configs = [
                 c for c in state["snapshot"]["agents"] if c["agent"]["id"] != config["agent"]["id"]
@@ -557,7 +558,7 @@ class WorkflowSession(AgentSession):
             planner = self.runtime._planner_factory(llm, tools)
             state["planner"] = planner
             if hasattr(planner, "set_instructions"):
-                from .registry import catalog
+                from aurora.agent.capability.registry import catalog
 
                 instructions = config["agent"]["instructions"]
                 if "call_agent" in tools:
@@ -713,7 +714,7 @@ class WorkflowSession(AgentSession):
 
     def _delegate(self, run_id, state, task, configs, progress):
         """在父运行内恢复独立子执行，不重建顶层会话。"""
-        from .delegation import execute_delegate
+        from aurora.agent.orchestration.delegation import execute_delegate
 
         return execute_delegate(self, run_id, state, task, configs, progress)
 

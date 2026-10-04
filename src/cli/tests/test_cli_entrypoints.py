@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from rich.console import Console
 
-from aurora.agent.conversation import SessionReply
+from aurora.agent.conversation.session import SessionReply
 from aurora.cli.commands.serve import _render_reply
 from aurora.cli.main import build_parser
 

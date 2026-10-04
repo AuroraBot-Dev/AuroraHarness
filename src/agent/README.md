@@ -54,10 +54,12 @@
 src/agent/                     # 分布：aurora-agent
 ├── pyproject.toml             # name = aurora-agent
 ├── src/aurora/
-│   ├── protocol.py            # 协议版本（与 Rust / 前端三处必须一致）
-│   ├── logging.py             # 统一彩色日志（RichHandler）
-│   ├── text.py                # 文本清洗与脱敏辅助
+│   ├── common/                # 公共协议版本、日志、文本清洗
 │   ├── agent/
+│   │   ├── orchestration/     # 会话运行时、协作工作流、子 Agent 委派
+│   │   ├── conversation/      # 对话历史与斜杠指令
+│   │   ├── capability/        # Agent 注册与可调用能力目录
+│   │   ├── preview/           # 浏览器预览配置与截图
 │   │   ├── core/              # 委派图 + 规划器 + 推理强度
 │   │   ├── tools/             # 工具抽象 + 内置工具 + 沙箱工具 + 风险分级
 │   │   ├── safety/            # 确认门 / 安全权限模型
@@ -71,6 +73,10 @@ src/agent/                     # 分布：aurora-agent
 
 src/cli/                       # 另一个分布：aurora-cli，只做参数解析与命令分发
 ```
+
+`aurora/` 与 `aurora/agent/` 顶层只保留 `__init__.py`，业务模块按职责放入子包。
+运行时入口为 `aurora.agent.orchestration.runtime.AgentRuntime`，协议版本位于
+`aurora.common.protocol`。
 
 ## 快速开始
 

@@ -9,7 +9,7 @@ from collections.abc import Mapping
 
 from websockets.asyncio.server import ServerConnection, serve
 
-from aurora.text import sanitize_value
+from aurora.common.text import sanitize_value
 
 from .api import RuntimeApi
 

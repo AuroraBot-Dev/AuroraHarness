@@ -2,7 +2,7 @@
 
 封装 ``rich`` 的 ``RichHandler``，为所有模块提供一致的彩色分级日志：
 
-    from aurora.logging import get_logger
+    from aurora.common.logging import get_logger
 
     log = get_logger(__name__)
     log.warning("这是一条带颜色的警告")

@@ -12,10 +12,10 @@ import pytest
 from websockets.asyncio.client import connect
 
 from aurora.agent.core import Effort, NoClarifier
-from aurora.agent.runtime import AgentRuntime, validate_workspace
+from aurora.agent.orchestration.runtime import AgentRuntime, validate_workspace
 from aurora.agent.sandbox import Sandbox, UnsafeSubprocessExecutor
 from aurora.agent.transport import RuntimeApi, serve_ndjson, serve_websocket
-from aurora.text import sanitize_text
+from aurora.common.text import sanitize_text
 
 
 class StaticPlanner:

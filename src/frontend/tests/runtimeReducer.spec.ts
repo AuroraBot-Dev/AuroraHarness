@@ -44,3 +44,18 @@ describe('workflow decisions', () => {
     expect(runtime.approvals[1]?.previewRequired).toBe(true)
   })
 })
+
+describe('stream responsiveness', () => {
+  it('shows a long completed answer immediately without a typewriter backlog', async () => {
+    setActivePinia(createPinia())
+    const sessions = useSessionStore()
+    sessions.upsert({ id: 'long', messages: [], runs: [], tasks: [] })
+    const runtime = useRuntimeStore()
+    const content = '长回答🚀'.repeat(5000)
+    const event = { protocol_version: 1 as const, event_id: 'long', occurred_at: '', session_id: 'long', run_id: 'r', payload: { messageId: 'long-answer', delta: content, content } }
+    await runtime.handleEvent({ ...event, type: 'message.delta' })
+    await runtime.handleEvent({ ...event, type: 'message.completed' })
+    expect(sessions.getSession('long')?.messages[0]?.content).toBe(content)
+    expect(sessions.getSession('long')?.messages[0]?.status).toBe('completed')
+  })
+})

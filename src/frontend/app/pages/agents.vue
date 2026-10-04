@@ -16,7 +16,7 @@ const labels: Record<ModelType, string> = { text: '文本', multimodal: '多模�
 const runLabels: Record<string, string> = { running: '运行中', waiting: '等待审批或补充信息', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' }
 const testLabels: Record<string, string> = { passed: '连接测试通过', failed: '连接测试失败', stale: '配置已变更，请重新测试' }
 const filtered = computed(() => store.agents.filter((a) => `${a.name} ${a.description}`.toLowerCase().includes(query.value.toLowerCase())))
-const modelOptions = computed(() => store.models.map((m) => ({ label: `${m.name} · ${labels[m.modelType]}`, value: m.id })))
+const modelOptions = computed(() => store.models.map((m) => ({ label: `${m.name} · ${m.modelName === "unconfigured" ? "未配置模型 ID" : m.modelName} · ${labels[m.modelType]}`, value: m.id })))
 const status = (id: string) => store.connected ? store.statuses.find((s) => s.id === id) : undefined
 useHead({ title: 'Agent' })
 
@@ -81,7 +81,10 @@ onBeforeUnmount(() => {
       <NCard v-for="agent in filtered" :key="agent.id" :title="agent.name" class="agent-card">
         <NSpace size="small"><NTag :type="agent.enabled ? 'success' : 'default'" size="small">{{ agent.enabled ? '已启用' : '已停用' }}</NTag><NTag size="small">{{ labels[store.models.find((m) => m.id === agent.modelConfigId)?.modelType ?? 'text'] }}</NTag><NTag v-if="agent.callable" size="small" type="info">已开放调用</NTag></NSpace>
         <p class="description">{{ agent.description || '尚未填写能力描述' }}</p>
-        <p class="model-name">模型：{{ store.models.find((m) => m.id === agent.modelConfigId)?.modelName ?? '未知' }}</p>
+        <p class="model-name">模型配置：{{ store.models.find((m) => m.id === agent.modelConfigId)?.name ?? '未知' }}</p>
+        <p v-if="store.models.find((m) => m.id === agent.modelConfigId)?.modelName === 'unconfigured'" class="issue">当前绑定的模型尚未填写模型 ID。请配置此模型，或编辑 Agent 选择已配置的模型。</p>
+        <p v-else class="model-name">模型 ID：{{ store.models.find((m) => m.id === agent.modelConfigId)?.modelName ?? '未知' }}</p>
+        <NuxtLink :to="{ path: '/settings', query: { model: agent.modelConfigId } }">配置此模型 →</NuxtLink>
         <template v-if="status(agent.id)">
           <p :class="{ issue: status(agent.id)!.issues.length }">{{ status(agent.id)!.issues.join('；') || '配置完整' }}</p>
           <p>{{ status(agent.id)!.test.status ? testLabels[status(agent.id)!.test.status!] : '尚未测试连接' }}<span v-if="status(agent.id)!.test.testedAt"> · {{ new Date(status(agent.id)!.test.testedAt!).toLocaleString() }}</span></p>

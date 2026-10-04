@@ -8,7 +8,7 @@ from dotenv import find_dotenv, load_dotenv
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from aurora.logging import register_secret
+from aurora.common.logging import register_secret
 
 # 向上搜索并加载项目根目录的 .env，不依赖 uv run 是否自动加载
 load_dotenv(find_dotenv())

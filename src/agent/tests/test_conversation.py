@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
-from aurora.agent.conversation import ConversationSession
+from aurora.agent.conversation.session import ConversationSession
 from aurora.agent.core import Effort
 
 

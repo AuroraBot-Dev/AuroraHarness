@@ -4,7 +4,7 @@
 //! NDJSON 判别成响应帧还是事件帧。它不碰进程、传输和 UI，所以既被纯 Rust 的
 //! runtime broker 使用，也被 Tauri 壳使用。
 //!
-//! 版本号在三处必须一致：本文件、Python 的 `aurora.protocol.PROTOCOL_VERSION`、
+//! 版本号在三处必须一致：本文件、Python 的 `aurora.common.protocol.PROTOCOL_VERSION`、
 //! 前端的 `app/utils/protocol.ts`。
 
 use serde_json::Value;

@@ -13,7 +13,7 @@ src/rust/
 
 只描述「线上长什么样」，不碰进程、传输与 UI：
 
-- `PROTOCOL_VERSION`——与 Python 的 `aurora.protocol.PROTOCOL_VERSION`、前端的
+- `PROTOCOL_VERSION`——与 Python 的 `aurora.common.protocol.PROTOCOL_VERSION`、前端的
   `app/utils/protocol.ts` 三处必须一致
 - `validate_request`——交给 Python 之前先校验请求信封
 - `classify_line` / `Frame`——把一行 NDJSON 判别为响应、事件或无效

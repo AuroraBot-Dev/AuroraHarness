@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { NButton, NCard, NCheckbox, NCollapse, NCollapseItem, NFormItem, NInput, NInputNumber, NSelect, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCard, NCheckbox, NCollapse, NCollapseItem, NFormItem, NInput, NInputNumber, NSelect, useMessage } from 'naive-ui'
 import { runtimeRequest } from '~/utils/runtimeClient'
 import type { ProviderConfig, ModelConfig, AgentConfig, WorkflowConfig } from '~/types/workflow'
 
 const message = useMessage()
+const route = useRoute()
+const expanded = ref<string[]>([])
 const providers = ref<ProviderConfig[]>([])
 const models = ref<ModelConfig[]>([])
 const agents = ref<AgentConfig[]>([])
@@ -28,7 +30,21 @@ async function load() {
   providers.value = p.items; models.value = m.items; agents.value = a.items; workflows.value = w.items
   defaultWorkflow.value = settings.defaultWorkflowId
 }
-onMounted(() => load().catch((error) => message.error(String(error))))
+async function openLinkedModel() {
+  const id = route.query.model
+  if (typeof id !== 'string' || !id) return
+  if (!models.value.some((item) => item.id === id)) {
+    message.error('找不到此模型配置，请刷新后重试')
+    return
+  }
+  editModel(id)
+  expanded.value = ['model']
+}
+onMounted(async () => {
+  try { await load(); await openLinkedModel() }
+  catch (error) { message.error(String(error)) }
+})
+watch(() => route.query.model, openLinkedModel)
 
 function editProvider(id: string | null) {
   selected.provider = id || ''
@@ -39,7 +55,7 @@ function editProvider(id: string | null) {
 function editModel(id: string | null) {
   selected.model = id || ''
   const item = models.value.find((entry) => entry.id === id)
-  Object.assign(model, { name: item?.name || '', provider_id: item?.providerId || '', model_name: item?.modelName || '', context_budget_tokens: item?.contextBudgetTokens || 8000, enabled: item ? !!item.enabled : true })
+  Object.assign(model, { name: item?.name || '', provider_id: item?.providerId || '', model_name: item?.modelName === 'unconfigured' ? '' : item?.modelName || '', context_budget_tokens: item?.contextBudgetTokens || 8000, enabled: item ? !!item.enabled : true })
   modelType.value = item?.modelType ?? 'text'; temperature.value = Number(item?.parameters.temperature ?? 0)
 }
 function editWorkflow(id: string | null) {
@@ -71,7 +87,7 @@ async function setDefault(value: string) {
   <NCard title="模型与 Agent 协作">
     <NuxtLink to="/agents">管理 Agent →</NuxtLink>
     <NFormItem label="新会话默认流程"><NSelect :value="defaultWorkflow" :options="options(workflows.filter((item) => item.enabled))" @update:value="setDefault" /></NFormItem>
-    <NCollapse>
+    <NCollapse v-model:expanded-names="expanded">
       <NCollapseItem title="供应商与凭据" name="provider">
         <NFormItem label="编辑已有供应商；清空后新建"><NSelect clearable :value="selected.provider || null" :options="options(providers)" @update:value="editProvider" /></NFormItem>
         <NFormItem label="名称"><NInput v-model:value="provider.name" /></NFormItem>
@@ -82,13 +98,14 @@ async function setDefault(value: string) {
       </NCollapseItem>
       <NCollapseItem title="模型配置" name="model">
         <NFormItem label="编辑已有模型；清空后新建"><NSelect clearable :value="selected.model || null" :options="options(models)" @update:value="editModel" /></NFormItem>
+        <NAlert type="info" :show-icon="false">配置名称仅用于显示；模型 ID 必须填写供应商 API 支持的实际名称。新建模型后，需要在 Agent 编辑页选择它；修改已有模型会更新使用它的 Agent。</NAlert>
         <NFormItem label="配置名称"><NInput v-model:value="model.name" /></NFormItem>
         <NFormItem label="供应商"><NSelect v-model:value="model.provider_id" :options="options(providers)" /></NFormItem>
-        <NFormItem label="模型名称"><NInput v-model:value="model.model_name" /></NFormItem>
+        <NFormItem label="模型 ID（供应商 API 中的名称）" required><NInput v-model:value="model.model_name" placeholder="填写供应商提供的模型 ID" /></NFormItem>
         <NFormItem label="上下文预算"><NInputNumber v-model:value="model.context_budget_tokens" :min="1" /></NFormItem>
         <NFormItem label="模型类型"><NSelect v-model:value="modelType" :options="[{ label: '文本', value: 'text' }, { label: '多模态（文本与图片）', value: 'multimodal' }, { label: '向量（暂不支持调用）', value: 'embedding' }]" /></NFormItem>
         <NFormItem label="Temperature"><NInputNumber v-model:value="temperature" :min="0" :max="2" :step="0.1" /></NFormItem>
-        <div class="actions"><NCheckbox v-model:checked="model.enabled">启用</NCheckbox><NButton :loading="busy" @click="save('model')">保存模型</NButton></div>
+        <div class="actions"><NCheckbox v-model:checked="model.enabled">启用</NCheckbox><NButton :loading="busy" :disabled="!model.name.trim() || !model.provider_id || !model.model_name.trim() || model.model_name.trim() === 'unconfigured'" @click="save('model')">保存模型</NButton></div>
       </NCollapseItem>
       <NCollapseItem title="预设协作流程" name="workflow">
         <NFormItem label="编辑已有流程；清空后新建"><NSelect clearable :value="selected.workflow || null" :options="options(workflows)" @update:value="editWorkflow" /></NFormItem>

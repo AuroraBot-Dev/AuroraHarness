@@ -117,3 +117,40 @@ describe('persistent session history', () => {
     expect(sessions.getSession('s')).toBeDefined()
   })
 })
+
+describe('approval responsiveness', () => {
+  beforeEach(() => { setActivePinia(createPinia()); vi.mocked(runtimeRequest).mockReset() })
+
+  it('acknowledges clicks immediately, blocks duplicates and restores rejected submissions', async () => {
+    const { useRuntimeStore } = await import('~/stores/runtimeStore')
+    const runtime = useRuntimeStore()
+    const sessions = useSessionStore()
+    sessions.upsert({ id: 's', status: 'waiting', messages: [], tasks: [], runs: [{ id: 'r', status: 'waiting' }] })
+    runtime.addInterruption('s', 'r', { interruptId: 'confirm' })
+    let rejectRequest!: (error: Error) => void
+    vi.mocked(runtimeRequest).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject }))
+    const submission = runtime.resolveApproval('confirm', true)
+    expect(runtime.approvalsFor('s')).toHaveLength(0)
+    expect(sessions.getSession('s')?.status).toBe('running')
+    await runtime.resolveApproval('confirm', true)
+    expect(runtimeRequest).toHaveBeenCalledTimes(1)
+    rejectRequest(new Error('提交失败'))
+    await expect(submission).rejects.toThrow('提交失败')
+    expect(runtime.approvalsFor('s')).toHaveLength(1)
+    expect(sessions.getSession('s')?.status).toBe('waiting')
+  })
+
+  it('does not reopen an accepted gate when subsequent execution fails', async () => {
+    const { useRuntimeStore } = await import('~/stores/runtimeStore')
+    const runtime = useRuntimeStore()
+    useSessionStore().upsert({ id: 's', status: 'waiting', messages: [], tasks: [], runs: [] })
+    runtime.addInterruption('s', 'r', { interruptId: 'confirm' })
+    let rejectRequest!: (error: Error) => void
+    vi.mocked(runtimeRequest).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject }))
+    const submission = runtime.resolveApproval('confirm', true)
+    await runtime.handleEvent({ protocol_version: 1, event_id: 'resumed', type: 'run.resumed', occurred_at: '', session_id: 's', run_id: 'r', payload: {} })
+    rejectRequest(new Error('执行失败'))
+    await expect(submission).rejects.toThrow('执行失败')
+    expect(runtime.approvalsFor('s')).toHaveLength(0)
+  })
+})

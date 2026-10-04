@@ -9,7 +9,8 @@ from typing import Any, Protocol
 from langgraph.types import interrupt
 from rich.console import Console
 
-from ...logging import get_logger
+from aurora.common.logging import get_logger
+
 from ..tools.base import RiskLevel, Tool
 
 log = get_logger(__name__)

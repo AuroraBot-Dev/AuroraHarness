@@ -54,9 +54,18 @@ watch(
     const element = scrollElement.value
     const follow = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 240
     await nextTick()
-    if (follow && scrollElement.value) scrollElement.value.scrollTo({ top: scrollElement.value.scrollHeight, behavior: 'smooth' })
+    if (follow && scrollElement.value) scrollElement.value.scrollTo({ top: scrollElement.value.scrollHeight, behavior: 'instant' })
   },
 )
+
+async function respondToInput(id: string, response: unknown) {
+  try { await runtime.resumeInput(id, response) }
+  catch (error) { notice.error(error instanceof Error ? error.message : String(error)) }
+}
+
+function decideApproval(id: string, approved: boolean) {
+  return respondToInput(id, { approved })
+}
 
 function statusIcon(task: TaskNode) {
   if (task.status === 'completed') return Check
@@ -128,7 +137,7 @@ function activityLabel(task: TaskNode) {
 
           <RunReview :run-id="entry.run.id" :status="entry.run.status" />
 
-          <ApprovalCard v-for="request in entry.requests" :key="request.id" :request="request" @decide="runtime.resolveApproval" @respond="runtime.resumeInput" />
+          <ApprovalCard v-for="request in entry.requests" :key="request.id" :request="request" @decide="decideApproval" @respond="respondToInput" />
 
           <template v-for="message in entry.responses" :key="message.id">
             <article v-if="message.kind === 'error' || message.status === 'failed'" class="error-message"><NIcon :component="AlertTriangle" :size="18" /><span>{{ message.content }}</span></article>

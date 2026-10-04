@@ -5,4 +5,4 @@
 
 ## 决策
 
-stdio NDJSON 与 WebSocket 共用版本化信封。协议版本由后端 `aurora.protocol` 和前端协议模块集中声明；不兼容变更必须提升主协议版本，并在握手阶段拒绝不支持的版本。
+stdio NDJSON 与 WebSocket 共用版本化信封。协议版本由后端 `aurora.common.protocol` 和前端协议模块集中声明；不兼容变更必须提升主协议版本，并在握手阶段拒绝不支持的版本。

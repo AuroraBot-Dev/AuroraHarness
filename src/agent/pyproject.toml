@@ -26,7 +26,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aurora", "aurora.agent*", "aurora.eval*"]
+include = ["aurora", "aurora.agent*", "aurora.common*", "aurora.eval*"]
 
 [tool.setuptools.package-data]
 "aurora.agent.mcp.packages" = ["*/package.yaml"]
