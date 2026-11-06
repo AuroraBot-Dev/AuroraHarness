@@ -1,33 +1,13 @@
 <script setup lang="ts">
 import { useMessage } from 'naive-ui'
-import { Edit, FileText, Layout, Plus, Puzzle, Settings } from '~/utils/icons'
-import type { TaskNode } from '~/types/agent'
+import { Edit, FileText, Folder, Layout, Puzzle, Settings } from '~/utils/icons'
+import type { ProjectRecord } from '~/types/agent'
 
-defineProps<{ collapsed?: boolean }>()
+const props = defineProps<{ workspace?: ProjectRecord; workspaceOpen: boolean }>()
+const emit = defineEmits<{ workspace: [] }>()
 const route = useRoute()
 const sessions = useSessionStore()
-const projects = useProjectStore()
 const message = useMessage()
-const detailTask = ref<TaskNode | null>(null)
-const currentSession = computed(() => sessions.getSession(String(route.params.sessionId ?? '')))
-const currentWorkspace = computed(() => {
-  const id = String(
-    route.params.projectId ?? currentSession.value?.projectId ?? projects.activeProjectId ?? '',
-  )
-  return projects.byId(id) ?? projects.projects[0]
-})
-const workspaceSessions = computed(() =>
-  sessions.sorted.filter(
-    (session) =>
-      session.projectId === currentWorkspace.value?.id ||
-      (!session.projectId && currentWorkspace.value?.id === projects.projects[0]?.id),
-  ),
-)
-const currentTasks = computed(() => {
-  const session = currentSession.value
-  const runId = session?.runs.at(-1)?.id
-  return session && runId ? session.tasks.filter((task) => task.runId === runId) : []
-})
 const navigation = [
   { label: '工作台', path: '/', icon: Layout },
   { label: 'Agent', path: '/agents', icon: Puzzle },
@@ -35,13 +15,12 @@ const navigation = [
 ]
 
 async function createConversation() {
-  const workspace = currentWorkspace.value
-  if (!workspace) {
+  if (!props.workspace) {
     await navigateTo('/')
     return
   }
   try {
-    const session = await sessions.create('新对话', workspace.id)
+    const session = await sessions.create('新对话', props.workspace.id)
     await navigateTo('/sessions/' + session.id)
   } catch (error) {
     message.error(String(error))
@@ -50,294 +29,248 @@ async function createConversation() {
 </script>
 
 <template>
-  <aside
-    class="sidebar"
-    :class="{ collapsed }"
-  >
+  <aside class="navigation-rail">
     <NuxtLink
       to="/"
-      class="brand-row"
+      class="rail-brand"
       aria-label="Aurora 首页"
     >
-      <span
-        class="brand-mark"
-        aria-hidden="true"
-      />
-      <span
-        v-if="!collapsed"
-        class="brand-name"
-      >
-        <strong>Aurora</strong>
-      </span>
+      <span />
     </NuxtLink>
     <nav
-      class="primary-nav"
+      class="rail-navigation"
       aria-label="主导航"
     >
       <button
-        class="nav-button"
+        class="rail-button"
         aria-label="新对话"
-        :title="collapsed ? '新对话' : undefined"
         @click="createConversation"
       >
         <AppIcon
           :component="Edit"
-          :size="18"
+          :size="21"
         />
-        <span
-          v-if="!collapsed"
-          class="nav-label"
-        >
-          新对话
-        </span>
-        <AppIcon
-          v-if="!collapsed"
-          class="nav-end"
-          :component="Plus"
-          :size="14"
-        />
+        <span>新对话</span>
       </button>
       <NuxtLink
         v-for="item in navigation"
         :key="item.path"
         :to="item.path"
-        class="nav-button"
+        class="rail-button"
         :class="{ active: route.path === item.path }"
         :aria-label="item.label"
         :aria-current="route.path === item.path ? 'page' : undefined"
-        :title="collapsed ? item.label : undefined"
       >
         <AppIcon
           :component="item.icon"
-          :size="18"
-          :weight="route.path === item.path ? 'fill' : 'light'"
+          :size="21"
+          :weight="route.path === item.path ? 'fill' : 'regular'"
         />
-        <span
-          v-if="!collapsed"
-          class="nav-label"
-        >
-          {{ item.label }}
-        </span>
+        <span>{{ item.label }}</span>
       </NuxtLink>
+      <button
+        class="rail-button workspace-rail-button"
+        :class="{ 'panel-open': workspaceOpen }"
+        aria-label="工作区"
+        :aria-expanded="workspaceOpen"
+        aria-controls="workspace-panel"
+        @click="emit('workspace')"
+      >
+        <AppIcon
+          :component="Folder"
+          :size="21"
+          :weight="workspaceOpen ? 'fill' : 'regular'"
+        />
+        <span>工作区</span>
+      </button>
     </nav>
-    <WorkspaceNavigator
-      :collapsed="collapsed"
-      :workspace="currentWorkspace"
-      :sessions="workspaceSessions"
-    />
-    <TaskTreePanel
-      v-if="!collapsed && currentTasks.length"
-      :tasks="currentTasks"
-      @select="detailTask = $event"
-    />
     <nav
-      class="sidebar-footer"
+      class="rail-footer"
       aria-label="应用导航"
     >
       <NuxtLink
         to="/settings"
-        class="settings-nav"
+        class="rail-button"
         :class="{ active: route.path === '/settings' }"
         aria-label="设置"
-        :title="collapsed ? '设置' : undefined"
+        :aria-current="route.path === '/settings' ? 'page' : undefined"
       >
         <AppIcon
           :component="Settings"
-          :size="18"
+          :size="21"
+          :weight="route.path === '/settings' ? 'fill' : 'regular'"
         />
-        <span v-if="!collapsed">设置</span>
+        <span>设置</span>
       </NuxtLink>
-      <div class="runtime-footer"><RuntimeStatus /></div>
+      <div class="rail-runtime"><RuntimeStatus /></div>
     </nav>
-    <TaskDetailsDrawer v-model:show="detailTask" />
   </aside>
 </template>
 
 <style scoped>
-.sidebar {
+.navigation-rail {
   display: flex;
-  width: 100%;
+  width: 84px;
   height: 100%;
   flex-direction: column;
-  overflow: hidden;
-}
-
-.brand-row {
-  display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 100px;
-  padding: 12px 22px;
+  padding: 0 10px 20px;
 }
 
-.brand-mark {
+.rail-brand {
   display: grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
+  width: 64px;
+  height: 96px;
+  flex: 0 0 96px;
   place-items: center;
+}
+
+.rail-brand span {
+  width: 30px;
+  height: 34px;
   background: var(--accent);
-  mask: url('/logo.svg') center / 29px no-repeat;
-  -webkit-mask: url('/logo.svg') center / 29px no-repeat;
+  mask: url('/logo.svg') center / contain no-repeat;
+  -webkit-mask: url('/logo.svg') center / contain no-repeat;
 }
 
-.brand-name {
+.rail-navigation,
+.rail-footer {
   display: grid;
-  gap: 1px;
+  width: 100%;
+  gap: 8px;
 }
 
-.brand-name strong {
-  font-size: 16px;
-  font-weight: 550;
-  letter-spacing: -0.04em;
-}
-
-.brand-name span {
-  color: var(--text-muted);
-  font-size: 9px;
-  letter-spacing: 0.12em;
-}
-
-.primary-nav {
-  display: grid;
-  gap: 5px;
-  padding: 8px 14px 28px;
-}
-
-.nav-button,
-.settings-nav {
+.rail-button {
   position: relative;
   display: flex;
+  width: 64px;
+  min-height: 58px;
+  flex-direction: column;
   align-items: center;
-  gap: 11px;
-  width: 100%;
-  min-height: 40px;
-  padding: 0 13px;
-  border: 0;
-  border-radius: 9px;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 2px;
+  border: 1px solid transparent;
+  border-radius: 19px;
   background: transparent;
   color: var(--text-muted);
-  text-align: left;
-  font-size: 13px;
-  font-weight: 500;
   cursor: pointer;
   transition:
-    background 150ms ease,
-    color 150ms ease;
+    color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
 }
 
-.nav-button:hover,
-.settings-nav:hover {
+.rail-button > span {
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.rail-button:hover {
+  background: var(--glass-fill);
   color: var(--text);
-  background: var(--surface-hover);
+  transform: translateY(-1px);
 }
 
-.nav-button.active,
-.settings-nav.active {
+.rail-button.active {
+  border-color: var(--glass-edge);
+  background: var(--glass-fill);
   color: var(--accent);
-  background: color-mix(in srgb, var(--glass-fill) 55%, transparent);
+  box-shadow: 0 3px 12px color-mix(in srgb, var(--accent-source) 5%, transparent);
 }
 
-.nav-button.active::before,
-.settings-nav.active::before {
+.workspace-rail-button.panel-open {
+  color: var(--accent);
+}
+
+.workspace-rail-button.panel-open::after {
   position: absolute;
-  left: 0;
-  width: 2px;
-  height: 14px;
-  border-radius: 2px;
+  right: -10px;
+  width: 3px;
+  height: 16px;
+  border-radius: 3px;
   background: var(--accent);
   content: '';
 }
 
-.nav-label {
-  flex: 1;
+.rail-footer {
+  margin-top: auto;
+  padding-top: 24px;
 }
 
-.nav-end {
-  color: var(--text-muted);
-}
-
-.sidebar-footer {
-  display: grid;
-  gap: 12px;
-  padding: 18px 14px;
-}
-
-.runtime-footer {
-  padding: 0 13px 8px;
-}
-
-.collapsed .brand-row {
-  justify-content: center;
-  padding: 0;
-}
-
-.collapsed .primary-nav,
-.collapsed .sidebar-footer {
-  padding-right: 8px;
-  padding-left: 8px;
-}
-
-.collapsed .nav-button,
-.collapsed .settings-nav {
-  justify-content: center;
-  padding: 0;
-}
-
-.collapsed .runtime-footer {
+.rail-runtime {
   text-align: center;
-  padding: 0;
+}
+
+.rail-runtime :deep(.status-label) {
+  display: none;
 }
 
 @media (max-width: 600px) {
-  .sidebar {
+  .navigation-rail {
+    width: 100%;
+    height: 100%;
     flex-direction: row;
-    align-items: center;
+    padding: 4px 8px;
   }
 
-  .brand-row,
-  .runtime-footer {
+  .rail-brand,
+  .rail-runtime {
     display: none;
   }
 
-  .primary-nav,
-  .collapsed .primary-nav {
+  .rail-navigation {
     display: flex;
     flex: 1;
-    gap: 0;
-    padding: 5px;
+    gap: 2px;
   }
 
-  .nav-button,
-  .settings-nav {
+  .rail-footer {
+    width: auto;
+    margin: 0;
+    padding: 0;
+  }
+
+  .rail-button {
+    width: 100%;
+    min-width: 0;
+    min-height: 52px;
     flex: 1;
-    flex-direction: column;
-    justify-content: center;
-    min-height: 48px;
-    gap: 4px;
-    padding: 5px 0;
+    gap: 5px;
+    border-radius: 14px;
   }
 
-  .nav-button::after,
-  .settings-nav::after {
-    content: attr(aria-label);
+  .rail-button > span {
     font-size: 9px;
-    line-height: 1;
   }
 
-  .nav-button.active::before,
-  .settings-nav.active::before {
+  .rail-footer .rail-button {
+    width: 48px;
+  }
+
+  .workspace-rail-button.panel-open::after {
     top: 0;
-    left: calc(50% - 8px);
+    right: calc(50% - 8px);
     width: 16px;
     height: 2px;
   }
+}
 
-  .sidebar-footer,
-  .collapsed .sidebar-footer {
-    width: 60px;
-    gap: 0;
-    padding: 5px 5px 5px 0;
+@media (max-height: 650px) and (min-width: 601px) {
+  .rail-brand {
+    height: 64px;
+    flex-basis: 64px;
+  }
+
+  .rail-button {
+    min-height: 50px;
+  }
+
+  .rail-navigation,
+  .rail-footer {
+    gap: 3px;
   }
 }
 </style>

@@ -97,7 +97,7 @@ test('uses an edge-to-edge canvas and remembers the glass material preference', 
   expect(await composer.evaluate((element) => getComputedStyle(element).backdropFilter)).toContain(
     'blur(32px)',
   )
-  await page.screenshot({ path: '/tmp/aurora-canvas-light.png' })
+  await page.screenshot({ path: '/tmp/aurora-canvas-light.png', animations: 'disabled' })
 
   await page.getByRole('link', { name: '设置', exact: true }).click()
   await page.getByText('纯色表面', { exact: true }).click()
@@ -112,18 +112,22 @@ test('uses an edge-to-edge canvas and remembers the glass material preference', 
   await page.getByText('磨砂玻璃', { exact: true }).click()
   await page.getByText('深色', { exact: true }).click()
   await page.getByRole('link', { name: '工作台', exact: true }).click()
-  await page.screenshot({ path: '/tmp/aurora-canvas-dark.png' })
+  await expect(page.getByRole('heading', { name: /今天，\s*想做点什么？/ })).toBeVisible()
+  await page.screenshot({ path: '/tmp/aurora-canvas-dark.png', animations: 'disabled' })
   for (const width of [320, 390, 768]) {
     await page.setViewportSize({ width, height: 844 })
     await expect(page.getByRole('textbox', { name: '任务内容' })).toBeVisible()
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true)
-    expect(
-      await page
-        .locator('.home-page')
-        .evaluate((element) => element.scrollWidth <= element.clientWidth),
-    ).toBe(true)
-    if (width === 390) await page.screenshot({ path: '/tmp/aurora-canvas-mobile.png' })
+    await expect
+      .poll(() =>
+        page
+          .locator('.home-page')
+          .evaluate((element) => element.scrollWidth <= element.clientWidth),
+      )
+      .toBe(true)
+    if (width === 390)
+      await page.screenshot({ path: '/tmp/aurora-canvas-mobile.png', animations: 'disabled' })
   }
 })

@@ -168,7 +168,7 @@ async function selectAction(key: string) {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.6;
 }
 
 .session-row:hover .session-more,

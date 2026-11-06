@@ -1,47 +1,124 @@
 <script setup lang="ts">
-import { ChevronLeft, ChevronRight } from '~/utils/icons'
+import { NDrawer } from 'naive-ui'
+import type { TaskNode } from '~/types/agent'
 
 const ui = useUiStore()
 const route = useRoute()
+const projects = useProjectStore()
+const sessions = useSessionStore()
 const compact = ref(false)
-const collapsed = computed(() => compact.value || ui.sidebarCollapsed)
+const mobile = ref(false)
+const overlayOpen = ref(false)
+const detailTask = ref<TaskNode | null>(null)
+const currentSession = computed(() => sessions.getSession(String(route.params.sessionId ?? '')))
+const workspace = computed(() => {
+  const id = String(
+    route.params.projectId ?? currentSession.value?.projectId ?? projects.activeProjectId ?? '',
+  )
+  return projects.byId(id) ?? projects.projects[0]
+})
+const workspaceSessions = computed(() => {
+  if (!workspace.value) return []
+  return sessions.sorted.filter(
+    (session) =>
+      session.projectId === workspace.value?.id ||
+      (!session.projectId && workspace.value?.id === projects.projects[0]?.id),
+  )
+})
+const tasks = computed(() => {
+  const session = currentSession.value
+  const runId = session?.runs.at(-1)?.id
+  return session && runId ? session.tasks.filter((task) => task.runId === runId) : []
+})
+const workspaceOpen = computed(() => (compact.value ? overlayOpen.value : !ui.sidebarCollapsed))
 const isCanvas = computed(() => route.path === '/' || route.path.startsWith('/projects/'))
 let compactQuery: MediaQueryList | null = null
+let mobileQuery: MediaQueryList | null = null
 
-function syncCompact(event?: MediaQueryListEvent) {
-  compact.value = event?.matches ?? compactQuery?.matches ?? false
+function syncViewport() {
+  compact.value = compactQuery?.matches ?? false
+  mobile.value = mobileQuery?.matches ?? false
+  if (!compact.value) overlayOpen.value = false
+}
+
+function toggleWorkspace() {
+  if (compact.value) overlayOpen.value = !overlayOpen.value
+  else ui.toggleSidebar()
+}
+
+function closeWorkspace() {
+  if (compact.value) overlayOpen.value = false
+  else if (!ui.sidebarCollapsed) ui.toggleSidebar()
 }
 
 onMounted(() => {
-  compactQuery = window.matchMedia('(max-width: 860px)')
-  syncCompact()
-  compactQuery.addEventListener('change', syncCompact)
+  compactQuery = window.matchMedia('(max-width: 1024px)')
+  mobileQuery = window.matchMedia('(max-width: 600px)')
+  syncViewport()
+  compactQuery.addEventListener('change', syncViewport)
+  mobileQuery.addEventListener('change', syncViewport)
 })
-onBeforeUnmount(() => compactQuery?.removeEventListener('change', syncCompact))
+onBeforeUnmount(() => {
+  compactQuery?.removeEventListener('change', syncViewport)
+  mobileQuery?.removeEventListener('change', syncViewport)
+})
 </script>
 
 <template>
   <div
     class="app-shell"
-    :class="{ 'is-collapsed': collapsed, 'is-canvas': isCanvas }"
+    :class="{ 'panel-visible': !compact && workspaceOpen, 'is-canvas': isCanvas }"
   >
     <CanvasAtmosphere />
-    <div class="app-sider">
-      <AppSidebar :collapsed="collapsed" />
-      <button
-        v-if="!compact"
-        class="sidebar-toggle"
-        :aria-label="collapsed ? '展开菜单' : '收起菜单'"
-        :aria-expanded="!collapsed"
-        @click="ui.toggleSidebar"
-      >
-        <AppIcon
-          :component="collapsed ? ChevronRight : ChevronLeft"
-          :size="14"
-        />
-      </button>
+    <div class="app-rail">
+      <AppSidebar
+        :workspace="workspace"
+        :workspace-open="workspaceOpen"
+        @workspace="toggleWorkspace"
+      />
+    </div>
+    <div
+      v-if="!compact && workspaceOpen"
+      id="workspace-panel"
+      class="app-workspace"
+    >
+      <WorkspaceNavigator
+        :workspace="workspace"
+        :sessions="workspaceSessions"
+        :tasks="tasks"
+        @close="closeWorkspace"
+        @select-task="detailTask = $event"
+      />
     </div>
     <div class="app-content"><slot /></div>
+    <NDrawer
+      v-if="compact"
+      v-model:show="overlayOpen"
+      :placement="mobile ? 'bottom' : 'left'"
+      :width="mobile ? undefined : 320"
+      :height="mobile ? '82dvh' : undefined"
+      :auto-focus="false"
+      :style="{
+        maxWidth: '100vw',
+        background: 'var(--app-bg)',
+        borderRadius: mobile ? '24px 24px 0 0' : '0 24px 24px 0',
+      }"
+    >
+      <div
+        id="workspace-panel"
+        class="workspace-overlay"
+      >
+        <WorkspaceNavigator
+          :workspace="workspace"
+          :sessions="workspaceSessions"
+          :tasks="tasks"
+          @close="closeWorkspace"
+          @navigate="overlayOpen = false"
+          @select-task="detailTask = $event"
+        />
+      </div>
+    </NDrawer>
+    <TaskDetailsDrawer v-model:show="detailTask" />
   </div>
 </template>
 
@@ -49,7 +126,7 @@ onBeforeUnmount(() => compactQuery?.removeEventListener('change', syncCompact))
 .app-shell {
   position: relative;
   display: grid;
-  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-columns: 84px minmax(0, 1fr);
   width: 100%;
   height: 100vh;
   height: 100dvh;
@@ -58,8 +135,8 @@ onBeforeUnmount(() => compactQuery?.removeEventListener('change', syncCompact))
   overflow: hidden;
 }
 
-.app-shell.is-collapsed {
-  grid-template-columns: 72px minmax(0, 1fr);
+.app-shell.panel-visible {
+  grid-template-columns: 84px 232px minmax(0, 1fr);
 }
 
 .app-shell > :deep(.canvas-atmosphere) {
@@ -71,7 +148,8 @@ onBeforeUnmount(() => compactQuery?.removeEventListener('change', syncCompact))
   opacity: 1;
 }
 
-.app-sider {
+.app-rail,
+.app-workspace {
   position: relative;
   z-index: 2;
   min-height: 0;
@@ -80,50 +158,10 @@ onBeforeUnmount(() => compactQuery?.removeEventListener('change', syncCompact))
   backdrop-filter: blur(var(--material-blur)) saturate(135%);
 }
 
-.app-sider::after {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 1px;
-  background: linear-gradient(
-    transparent,
-    var(--glass-edge) 18%,
-    var(--glass-edge) 82%,
-    transparent
-  );
-  content: '';
-  pointer-events: none;
-}
-
-.sidebar-toggle {
-  position: absolute;
-  top: 37px;
-  right: 12px;
-  display: grid;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  place-items: center;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: background 150ms ease;
-}
-
-.sidebar-toggle:hover {
-  background: var(--surface-hover);
-}
-
-.is-collapsed .sidebar-toggle {
-  top: 90px;
-  right: 23px;
-}
-
-.is-collapsed .app-sider :deep(.primary-nav) {
-  padding-top: 44px;
+.app-workspace {
+  box-shadow:
+    inset 1px 0 0 var(--glass-edge),
+    1px 0 0 var(--glass-edge);
 }
 
 .app-content {
@@ -135,27 +173,32 @@ onBeforeUnmount(() => compactQuery?.removeEventListener('change', syncCompact))
   overflow: hidden;
 }
 
-@media (max-width: 860px) {
-  .is-collapsed .app-sider :deep(.primary-nav) {
-    padding-top: 8px;
+.workspace-overlay {
+  height: 100%;
+  overflow: hidden;
+}
+
+@media (max-width: 1024px) {
+  .app-shell.panel-visible {
+    grid-template-columns: 84px minmax(0, 1fr);
+  }
+
+  .app-workspace {
+    display: none;
   }
 }
 
 @media (max-width: 600px) {
   .app-shell,
-  .app-shell.is-collapsed {
+  .app-shell.panel-visible {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) calc(64px + env(safe-area-inset-bottom));
   }
 
-  .app-sider {
+  .app-rail {
     grid-row: 2;
     padding-bottom: env(safe-area-inset-bottom);
     box-shadow: 0 -1px 0 var(--glass-edge);
-  }
-
-  .app-sider::after {
-    display: none;
   }
 
   .app-content {

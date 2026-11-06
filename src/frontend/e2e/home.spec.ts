@@ -4,5 +4,5 @@ test('renders the disconnected workspace entry screen', async ({ page }) => {
   await page.goto('/')
   await expect(page).toHaveTitle(/Aurora Agent/)
   await expect(page.getByRole('heading', { name: /今天，\s*想做点什么？/ })).toBeVisible()
-  await expect(page.getByRole('button', { name: /添加工作区/ })).toBeVisible()
+  await expect(page.locator('main').getByRole('button', { name: /添加工作区/ })).toBeVisible()
 })
