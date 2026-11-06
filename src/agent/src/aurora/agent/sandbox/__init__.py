@@ -9,7 +9,7 @@ from .executor import (
     SandboxUnavailableError,
     UnsafeSubprocessExecutor,
 )
-from .local import LocalSandboxExecutor
+from .local_executor import LocalSandboxExecutor
 from .sandbox import DEFAULT_ROOT, Sandbox
 
 _current: Sandbox | None = None

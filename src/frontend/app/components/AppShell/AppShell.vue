@@ -69,7 +69,7 @@ onBeforeUnmount(() => {
     class="app-shell"
     :class="{ 'panel-visible': !compact && workspaceOpen, 'is-canvas': isCanvas }"
   >
-    <CanvasAtmosphere />
+    <CanvasAtmosphere v-if="!route.path.startsWith('/sessions/')" />
     <div class="app-rail">
       <AppSidebar
         :workspace="workspace"

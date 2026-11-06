@@ -16,7 +16,7 @@ from aurora.agent.core import (
 )
 from aurora.agent.model_access import build_llm
 from aurora.agent.tools import get_available_tools
-from aurora.cli.workflow import respond_to_interrupt
+from aurora.cli.interactions import respond_to_interrupt
 
 DEFAULT_GOAL = "找到main.py并且分析这份文件的代码在干什么"
 

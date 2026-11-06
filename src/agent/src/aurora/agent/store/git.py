@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 from uuid import uuid4
 
 from ..tools.base import RiskLevel, Tool
@@ -48,6 +48,7 @@ class RunCheckpoint:
     after: GitSnapshot | None = None
     status: str = "running"
     reverted: bool = False
+    restored: bool = False
 
 
 class GitRepository:
@@ -119,11 +120,271 @@ class GitRepository:
             raise GitError(f"运行已存在 Git 快照: {run_id}")
         self._checkpoints[run_id] = RunCheckpoint(run_id, self.capture())
 
-    def finish_run(self, run_id: str, status: str) -> None:
+    def finish_run(
+        self, run_id: str, status: str, *, snapshot: GitSnapshot | None = None
+    ) -> GitSnapshot:
         """更新一轮运行结束时的快照和状态。"""
         checkpoint = self._checkpoint(run_id)
-        checkpoint.after = self.capture()
+        checkpoint.after = snapshot if snapshot is not None else self.capture()
         checkpoint.status = status
+        return checkpoint.after
+
+    def export_checkpoint(self, run_id: str, directory: Path) -> dict[str, Any]:
+        """把活动运行的基线与索引存入独立对象包，返回可持久化的引用。"""
+        checkpoint = self._checkpoint(run_id)
+        if checkpoint.status != "running":
+            raise GitError("只能导出活动运行的 Git 检查点")
+        directory = self._checkpoint_directory(directory)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        before = checkpoint.before
+        before_key = self._snapshot_key(before)
+        before_key["tree"] = self._scoped_tree(before.tree)
+        roots = {before_key["tree"]}
+        index_oid = None
+        if before.index_data is not None:
+            index_oid = self._store_blob(before.index_data)
+            roots.add(index_oid)
+            roots.update(self._index_objects(before.index_data))
+        after_key = None
+        if checkpoint.after is not None:
+            after_key = self._snapshot_key(checkpoint.after)
+            after_key["tree"] = self._scoped_tree(checkpoint.after.tree)
+            roots.add(after_key["tree"])
+        manifest = {
+            "run_id": run_id,
+            "repository": self._repository_identity(),
+            "before": before_key,
+            "after": after_key,
+            "paused": self._snapshot_key(self.capture()),
+            "index": index_oid,
+        }
+        manifest_oid = self._store_blob(json.dumps(manifest, sort_keys=True).encode())
+        roots.add(manifest_oid)
+        with tempfile.NamedTemporaryFile(
+            dir=directory, prefix=".aurora-checkpoint-", suffix=".tmp", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+        try:
+            with temporary.open("wb") as stream:
+                self._binary_git(
+                    ["pack-objects", "--stdout", "--revs"],
+                    input=("\n".join(sorted(roots)) + "\n").encode(),
+                    stdout=stream,
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            with temporary.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            os.replace(temporary, directory / f"{digest}.pack")
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {"version": 1, "manifest": manifest_oid, "pack": digest}
+
+    def restore_checkpoint(self, run_id: str, data: dict, directory: Path) -> None:
+        """校验运行归属及暂停状态，在私有对象库中恢复 Git 基线。"""
+        if run_id in self._checkpoints:
+            raise GitError("运行已有 Git 检查点")
+        directory = self._checkpoint_directory(directory)
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"version", "manifest", "pack"}
+            or type(data["version"]) is not int
+            or data["version"] != 1
+            or not self._is_oid(data["manifest"])
+            or not self._is_oid(data["pack"], 64)
+        ):
+            raise GitError("Git 检查点格式无效")
+        archive = directory / f"{data['pack']}.pack"
+        if archive.is_symlink() or not archive.is_file():
+            raise GitError("Git 检查点对象包不存在或路径无效")
+        with archive.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != data["pack"]:
+                raise GitError("Git 检查点对象包校验失败")
+            stream.seek(0)
+            self._binary_git(["index-pack", "--stdin", "--strict"], stdin=stream)
+        if self._object_type(data["manifest"]) != "blob":
+            raise GitError("Git 检查点清单类型无效")
+        if (
+            int(self._run(["cat-file", "-s", data["manifest"]], env=self._object_env()).stdout)
+            > 16384
+        ):
+            raise GitError("Git 检查点清单过大")
+        try:
+            manifest = json.loads(self._binary_git(["cat-file", "blob", data["manifest"]]))
+        except (UnicodeError, ValueError) as exc:
+            raise GitError("Git 检查点清单无效") from exc
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != {"run_id", "repository", "before", "after", "paused", "index"}
+            or manifest["run_id"] != run_id
+            or manifest["repository"] != self._repository_identity()
+        ):
+            raise GitError("Git 检查点不属于当前工作区或运行")
+        if manifest["paused"] != self._snapshot_key(self.capture()):
+            raise GitError("暂停后的工作区、索引或分支已发生变化")
+        before = self._validated_snapshot(manifest["before"])
+        after = manifest["after"]
+        phase_snapshot = (
+            GitSnapshot(**self._validated_snapshot(after), index_data=None)
+            if after is not None
+            else None
+        )
+        index_oid = manifest["index"]
+        index_data = None
+        if index_oid is not None:
+            if not self._is_oid(index_oid) or self._object_type(index_oid) != "blob":
+                raise GitError("Git 检查点索引对象无效")
+            index_data = self._binary_git(["cat-file", "blob", index_oid])
+        if self._digest(index_data) != before["index_hash"]:
+            raise GitError("Git 检查点索引校验失败")
+        snapshot = GitSnapshot(**before, index_data=index_data)
+        self._checkpoints[run_id] = RunCheckpoint(run_id, snapshot, phase_snapshot, restored=True)
+
+    def _validated_snapshot(self, value: Any) -> dict[str, str]:
+        """校验快照字段和引用的树对象。"""
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"tree", "head", "branch", "index_hash"}
+            or not self._is_oid(value["tree"])
+            or self._object_type(value["tree"]) != "tree"
+            or (value["head"] != "" and not self._is_oid(value["head"]))
+            or not isinstance(value["branch"], str)
+            or not self._is_oid(value["index_hash"], 64)
+        ):
+            raise GitError("Git 检查点基线无效")
+        return value
+
+    def _repository_identity(self) -> str:
+        """绑定规范工作区路径、工作树目录及仓库实体。"""
+        stat = self._git_dir.stat()
+        identity = [str(self.workspace), str(self._git_dir.resolve()), stat.st_dev, stat.st_ino]
+        return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+    def _checkpoint_directory(self, directory: Path) -> Path:
+        """将持久快照限制在工作树外部的专用目录。"""
+        directory = Path(directory)
+        if directory.is_symlink() or directory.resolve().is_relative_to(self.root):
+            raise GitError("Git 检查点目录必须位于工作树外且不能是符号链接")
+        return directory.resolve()
+
+    @staticmethod
+    def _snapshot_key(snapshot: GitSnapshot) -> dict[str, str]:
+        """返回校验暂停状态所需的稳定字段。"""
+        return {
+            "tree": snapshot.tree,
+            "head": snapshot.head,
+            "branch": snapshot.branch,
+            "index_hash": snapshot.index_hash,
+        }
+
+    @staticmethod
+    def _is_oid(value: Any, length: int | None = None) -> bool:
+        """校验完整小写对象或摘要标识。"""
+        return (
+            isinstance(value, str)
+            and (len(value) == length if length else len(value) in {40, 64})
+            and all(char in "0123456789abcdef" for char in value)
+        )
+
+    def _object_type(self, oid: str) -> str:
+        """读取私有对象的实际类型。"""
+        return self._run(["cat-file", "-t", oid], env=self._object_env()).stdout.strip()
+
+    def _store_blob(self, content: bytes) -> str:
+        """把二进制数据作为 blob 保存于私有对象库。"""
+        return self._binary_git(["hash-object", "-w", "--stdin"], input=content).decode().strip()
+
+    def _scoped_tree(self, tree: str) -> str:
+        """为子目录基线保留原路径，仅归档工作区内的文件。"""
+        if not self.scope.parts:
+            return tree
+        subtree = self._run(
+            ["rev-parse", "--verify", f"{tree}:{self.scope.as_posix()}"],
+            env=self._object_env(),
+            check=False,
+        )
+        if subtree.returncode:
+            return self._empty_tree()
+        oid = subtree.stdout.strip()
+        for name in reversed(self.scope.parts):
+            entry = b"040000 tree " + oid.encode() + b"\t" + os.fsencode(name) + b"\0"
+            oid = self._binary_git(["mktree", "-z"], input=entry).decode().strip()
+        return oid
+
+    def _index_entries(self, data: bytes | None) -> list[tuple[str, str, str, str]]:
+        """从快照索引列出模式、对象、暂存状态及仓库相对路径。"""
+        if data is None:
+            return []
+        with tempfile.TemporaryDirectory(dir=self._temp_root) as folder:
+            path = Path(folder) / "index"
+            path.write_bytes(data)
+            env = self._snapshot_env(path)
+            if self._run(["rev-parse", "--shared-index-path"], env=env).stdout.strip():
+                raise GitError("分离索引暂不支持持久恢复")
+            output = self._run(["ls-files", "-v", "--stage", "-z"], env=env).stdout
+        entries = []
+        for entry in filter(None, output.split("\0")):
+            header, path = entry.split("\t", 1)
+            flag, mode, oid, stage = header.split()
+            entries.append((mode, oid, flag + stage, path))
+        return entries
+
+    def _index_objects(self, data: bytes) -> set[str]:
+        """仅保留当前工作区内的暂存 blob，排除独立子模块提交。"""
+        return {
+            oid
+            for mode, oid, _, path in self._index_entries(data)
+            if mode != "160000" and Path(path).is_relative_to(self.scope)
+        }
+
+    def _restore_index_objects(self, data: bytes) -> None:
+        """回滚前将原本属于项目暂存区的缺失 blob 补回仓库。"""
+        for oid in self._index_objects(data):
+            if self._run(["cat-file", "-e", oid], check=False).returncode == 0:
+                continue
+            with tempfile.TemporaryFile() as stream:
+                self._binary_git(["cat-file", "blob", oid], stdout=stream)
+                stream.seek(0)
+                self._binary_git(["hash-object", "-w", "--stdin"], stdin=stream, private=False)
+
+    def _sibling_staging_changed(self, checkpoint: RunCheckpoint) -> bool:
+        """检查子目录之外的暂存项是否会被恢复操作覆盖。"""
+        if not checkpoint.restored or not self.scope.parts or checkpoint.after is None:
+            return False
+
+        def siblings(snapshot: GitSnapshot):
+            return [
+                row
+                for row in self._index_entries(snapshot.index_data)
+                if not Path(row[3]).is_relative_to(self.scope)
+            ]
+
+        return siblings(checkpoint.before) != siblings(checkpoint.after)
+
+    def _binary_git(
+        self,
+        args: list[str],
+        *,
+        input: bytes | None = None,
+        stdin: BinaryIO | None = None,
+        stdout: BinaryIO | int = subprocess.PIPE,
+        private: bool = True,
+    ) -> bytes:
+        """以字节流传输 Git 对象和对象包。"""
+        result = subprocess.run(
+            ["git", "-C", str(self.root), *args],
+            env={**os.environ, **(self._object_env() if private else {})},
+            stderr=subprocess.PIPE,
+            check=False,
+            input=input,
+            stdin=stdin,
+            stdout=stdout,
+        )
+        if result.returncode:
+            raise GitError(
+                result.stderr.decode("utf-8", errors="replace").strip() or "Git 对象操作失败"
+            )
+        return result.stdout or b""
 
     def capture(self) -> GitSnapshot:
         """把当前工作树写入会话专用的临时对象库。"""
@@ -166,6 +427,9 @@ class GitRepository:
         reason = self._rollback_reason(checkpoint, latest)
         if eligible and not current_matches:
             reason = "运行结束后项目已发生变化，不能安全回滚"
+        elif can_rollback and checkpoint and self._sibling_staging_changed(checkpoint):
+            can_rollback = False
+            reason = "工作区外的暂存内容已变化，不能恢复原索引"
         return {
             "view": view,
             "runId": checkpoint.run_id if checkpoint else None,
@@ -216,6 +480,10 @@ class GitRepository:
         current = self.capture()
         if not self._same_state(current, checkpoint.after):
             raise GitError("运行结束后工作区、索引或分支已发生变化，已拒绝覆盖新内容")
+        if self._sibling_staging_changed(checkpoint):
+            raise GitError("工作区外的暂存内容已变化，不能恢复原索引")
+        if checkpoint.restored and checkpoint.before.index_data is not None:
+            self._restore_index_objects(checkpoint.before.index_data)
         safety = current
         try:
             self._restore(checkpoint.before, current)
@@ -360,20 +628,24 @@ class GitRepository:
             if exists:
                 self._run(["checkout", target.tree, "--", path], env=self._object_env())
             else:
-                destination = (self.root / path).resolve()
-                if not destination.is_relative_to(self.workspace):
+                destination = self.root / path
+                if not destination.parent.resolve().is_relative_to(self.workspace):
                     raise GitError(f"回滚路径越界: {path}")
                 if destination.is_dir() and not destination.is_symlink():
-                    shutil.rmtree(destination)
+                    destination.rmdir()
                 else:
                     destination.unlink(missing_ok=True)
         if target.index_data is None:
             self._index_path.unlink(missing_ok=True)
         else:
             self._index_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self._temp_root / "restore-index"
-            temporary.write_bytes(target.index_data)
-            os.replace(temporary, self._index_path)
+            with tempfile.NamedTemporaryFile(dir=self._index_path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+            try:
+                temporary.write_bytes(target.index_data)
+                os.replace(temporary, self._index_path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def _validate_changed_path(self, path: str, before: str, after: str) -> str:
         """把前端相对路径限定到当前工作区的改动集合。"""

@@ -70,8 +70,12 @@ rmSync(TMP_VENV, { recursive: true, force: true })
 rmSync(DIST_DIR, { recursive: true, force: true })
 mkdirSync(SIDECAR_DIR, { recursive: true })
 
-run('uv', ['python', 'install', PYTHON_VERSION])
-const PYTHON_BIN = run('uv', ['python', 'find', PYTHON_VERSION], { capture: true })
+run('uv', ['python', 'install', '--no-bin', '--no-registry', PYTHON_VERSION])
+const PYTHON_BIN = run(
+  'uv',
+  ['python', 'find', '--managed-python', '--system', '--no-project', '--resolve-links', PYTHON_VERSION],
+  { capture: true },
+)
 // 解释器位置随平台不同（Windows 在 prefix 根、Unix 在 bin/），直接问解释器最稳。
 const PYTHON_HOME = run(PYTHON_BIN, ['-c', 'import sys; print(sys.prefix)'], { capture: true })
 const PREFIX_SITE_REL = run(
@@ -82,7 +86,10 @@ const PREFIX_SITE_REL = run(
   ],
   { capture: true },
 )
-cpSync(PYTHON_HOME, path.join(SIDECAR_DIR, 'python'), { recursive: true })
+cpSync(PYTHON_HOME, path.join(SIDECAR_DIR, 'python'), {
+  recursive: true,
+  verbatimSymlinks: true,
+})
 
 run('uv', ['venv', '--python', PYTHON_BIN, TMP_VENV])
 const VENV_PYTHON = ['bin/python', 'Scripts/python.exe']
@@ -98,13 +105,28 @@ const wheels = readdirSync(DIST_DIR)
   .filter((name) => name.endsWith('.whl'))
   .map((name) => path.join(DIST_DIR, name))
 if (wheels.length === 0) fail('uv build 没有产出任何 wheel')
-run('uv', ['pip', 'install', '--python', VENV_PYTHON, ...wheels])
+const constraints = path.join(DIST_DIR, 'runtime-requirements.txt')
+run(
+  'uv',
+  [
+    'export',
+    '--frozen',
+    '--no-dev',
+    '--all-packages',
+    '--no-emit-workspace',
+    '--no-hashes',
+    '--output-file',
+    constraints,
+  ],
+  { capture: true },
+)
+run('uv', ['pip', 'install', '--python', VENV_PYTHON, '--constraint', constraints, ...wheels])
 
 // 依赖合并进解释器自身的 prefix：.pth 只在解释器自己的 site-packages 下执行，
 // 靠 PYTHONPATH 旁挂的话 pywin32 的 bootstrap 不会运行。
 const PREFIX_SITE = path.join(SIDECAR_DIR, 'python', PREFIX_SITE_REL)
 rmSync(PREFIX_SITE, { recursive: true, force: true })
-cpSync(findSitePackages(TMP_VENV), PREFIX_SITE, { recursive: true })
+cpSync(findSitePackages(TMP_VENV), PREFIX_SITE, { recursive: true, verbatimSymlinks: true })
 
 rmSync(TMP_VENV, { recursive: true, force: true })
 rmSync(DIST_DIR, { recursive: true, force: true })
@@ -127,7 +149,21 @@ if (!IS_WINDOWS) {
 
 // 导入自检：把「打好了但其实 import 失败」挡在构建阶段。pywin32 的 DLL bootstrap 与
 // aurora 命名空间合并都曾在这里出过问题，只靠拷贝成功是看不出来的。
-run(SIDECAR_PYTHON, ['-c', 'import aurora.agent, aurora.cli; print("导入自检通过")'])
+run(SIDECAR_PYTHON, [
+  '-c',
+  [
+    'import pathlib, sys',
+    'root = pathlib.Path(sys.argv[1]).resolve()',
+    'assert pathlib.Path(sys.prefix).resolve() == root, "sidecar prefix 未指向打包目录"',
+    'assert pathlib.Path(sys.base_prefix).resolve() == root, "sidecar 仍依赖外部 Python"',
+    'from aurora.agent.orchestration.runtime import AgentRuntime',
+    'from aurora.agent.transport import RuntimeApi',
+    'from aurora.cli.main import build_parser',
+    'build_parser()',
+    'print("独立解释器与模块导入自检通过")',
+  ].join('; '),
+  path.join(SIDECAR_DIR, 'python'),
+])
 
 console.log(`\nsidecar 构建完成: ${SIDECAR_DIR}`)
 console.log(`解释器:   ${SIDECAR_PYTHON}`)

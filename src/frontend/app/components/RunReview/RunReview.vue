@@ -3,7 +3,7 @@ import { NAlert, NButton, NTag } from 'naive-ui'
 import { onRuntimeEvent, runtimeRequest } from '~/utils/runtimeClient'
 import type { RunDetail } from '~/types/workflow'
 const route = useRoute()
-const props = defineProps<{ runId: string; status: string }>()
+const props = defineProps<{ runId: string; status: string; reviewsOnly?: boolean }>()
 const detail = ref<RunDetail | null>(null)
 const error = ref('')
 const images = reactive<Record<string, string>>({})
@@ -44,7 +44,7 @@ onMounted(() => {
   unsubscribe = onRuntimeEvent((event) => {
     if (event.run_id !== props.runId) return
     if (event.type.startsWith('stage.'))
-      stage.value = `${labels[String(event.payload.stepKey)] || event.payload.stepKey} · 第 ${Number(event.payload.iteration || 0) + 1} 轮 · ${event.type.endsWith('completed') ? '已完成' : '进行中'}`
+      stage.value = `${String(event.payload.stepKey).startsWith('delegate_') ? '委派任务' : labels[String(event.payload.stepKey)] || event.payload.stepKey} · 第 ${Number(event.payload.iteration || 0) + 1} 轮 · ${{ 'stage.completed': '已完成', 'stage.waiting': '等待输入', 'stage.failed': '失败' }[event.type] || '进行中'}`
   })
 })
 onBeforeUnmount(() => unsubscribe?.())
@@ -58,11 +58,11 @@ watch(
 
 <template>
   <div
-    v-if="stage || detail?.agentRuns.length || error"
+    v-if="(reviewsOnly ? detail?.reviews.length : stage || detail?.agentRuns.length) || error"
     class="run-review"
   >
     <p
-      v-if="stage"
+      v-if="stage && !reviewsOnly"
       class="stage"
     >
       {{ stage }}
@@ -74,7 +74,7 @@ watch(
       {{ error }}
     </NAlert>
     <details
-      v-if="detail?.agentRuns.length"
+      v-if="detail?.agentRuns.length && !reviewsOnly"
       :open="!!route.hash"
     >
       <summary>Agent 执行记录 · {{ detail.agentRuns.length }} 个阶段</summary>

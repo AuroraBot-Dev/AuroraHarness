@@ -14,7 +14,10 @@ const children = computed(() => props.tasks.filter((task) => task.parentId === p
 </script>
 
 <template>
-  <li class="tree-branch">
+  <li
+    class="tree-branch"
+    :data-task-id="task.id"
+  >
     <div
       class="tree-row"
       :class="{ selected: selectedId === task.id }"
@@ -23,6 +26,7 @@ const children = computed(() => props.tasks.filter((task) => task.parentId === p
         v-if="children.length"
         class="toggle-button"
         :aria-label="expanded ? '折叠任务' : '展开任务'"
+        :aria-expanded="expanded"
         @click="expanded = !expanded"
       >
         <AppIcon
@@ -41,6 +45,9 @@ const children = computed(() => props.tasks.filter((task) => task.parentId === p
         <span
           class="task-status"
           :class="task.status"
+          :title="task.status === 'blocked' ? '已阻断' : undefined"
+          :aria-label="task.status === 'blocked' ? '已阻断' : undefined"
+          :role="task.status === 'blocked' ? 'img' : undefined"
         />
         <span
           class="task-name"
@@ -140,6 +147,11 @@ const children = computed(() => props.tasks.filter((task) => task.parentId === p
 .task-status.failed {
   border-color: #d14343;
   background: #d14343;
+}
+.task-status.blocked {
+  border-color: var(--text-muted);
+  border-radius: 2px;
+  transform: rotate(45deg);
 }
 .task-status.cancelled {
   border-color: #71717a;

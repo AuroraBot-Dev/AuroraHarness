@@ -2,11 +2,13 @@
 import { NEmpty, NScrollbar } from 'naive-ui'
 import { GitBranch } from '~/utils/icons'
 import type { TaskNode } from '~/types/agent'
+import { taskForest } from '~/utils/tasks'
 
 const props = defineProps<{ tasks: TaskNode[] }>()
 const emit = defineEmits<{ select: [task: TaskNode] }>()
 const selectedId = ref<string | null>(null)
-const roots = computed(() => props.tasks.filter((task) => task.parentId === null))
+const forest = computed(() => taskForest(props.tasks))
+const roots = computed(() => forest.value.filter((task) => task.parentId === null))
 
 function selectTask(taskId: string) {
   selectedId.value = taskId
@@ -44,7 +46,7 @@ function selectTask(taskId: string) {
           v-for="root in roots"
           :key="root.id"
           :task="root"
-          :tasks="tasks"
+          :tasks="forest"
           :selected-id="selectedId"
           @select="selectTask"
         />

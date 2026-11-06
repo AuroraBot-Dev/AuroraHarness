@@ -1,22 +1,14 @@
 <script setup lang="ts">
-import { NBadge, NButton, NSpin, NSelect, useMessage } from 'naive-ui'
-import {
-  AlertTriangle,
-  Book,
-  Check,
-  Clock,
-  Edit,
-  File,
-  FileDiff,
-  Folder,
-  Loader,
-  Terminal2,
-} from '~/utils/icons'
-import type { SessionRecord, TaskNode } from '~/types/agent'
+import { NButton, NDropdown, NSpin, useMessage } from 'naive-ui'
+import { AlertTriangle, Dots, File } from '~/utils/icons'
+import type { SessionRecord } from '~/types/agent'
 import type { WorkflowConfig } from '~/types/workflow'
 import { runtimeRequest } from '~/utils/runtimeClient'
 
 const props = defineProps<{ session: SessionRecord }>()
+const view = defineModel<'conversation' | 'trace'>('view', { default: 'conversation' })
+const traceRunId = ref('')
+const route = useRoute()
 const runtime = useRuntimeStore()
 const sessions = useSessionStore()
 const notice = useMessage()
@@ -47,6 +39,7 @@ async function clearContext() {
 const git = useGitStore()
 const scrollElement = ref<HTMLElement | null>(null)
 const showChanges = ref(false)
+const optionsOpen = ref(false)
 const activeRun = computed(() =>
   [...props.session.runs]
     .reverse()
@@ -63,24 +56,66 @@ const timeline = computed(() =>
       (message) =>
         message.runId === run.id && message.role !== 'user' && message.visibility !== 'internal',
     ),
-    tasks: props.session.tasks.filter((task) => task.runId === run.id),
-    requests: runtime.approvalsFor(props.session.id).filter((request) => request.runId === run.id),
+    requests: runtime.requestsFor(props.session.id).filter((request) => request.runId === run.id),
   })),
 )
-const statusText = computed(
-  () =>
-    ({
-      idle: '就绪',
-      queued: '排队中',
-      running: '正在执行',
-      waiting: '等待输入',
-      completed: '已完成',
-      failed: '执行失败',
-      cancelled: '已取消',
-      interrupted: '已中断',
-    })[props.session.status],
+const sessionOptions = computed(() => [
+  {
+    label: '协作流程',
+    key: 'workflow',
+    disabled:
+      !!activeRun.value ||
+      runtime.connectionStatus !== 'connected' ||
+      !workflows.value.some((item) => item.enabled),
+    children: workflows.value
+      .filter((item) => item.enabled)
+      .map((item) => ({
+        label: item.name + (item.id === props.session.workflowId ? '（当前）' : ''),
+        key: `workflow:${item.id}`,
+        disabled: !!activeRun.value || runtime.connectionStatus !== 'connected',
+      })),
+  },
+  {
+    label: '清空上下文',
+    key: 'clear',
+    disabled: !!activeRun.value || runtime.connectionStatus !== 'connected',
+  },
+])
+
+function selectSessionOption(key: string | number) {
+  if (key === 'clear') void clearContext()
+  else if (String(key).startsWith('workflow:'))
+    void changeWorkflow(String(key).slice('workflow:'.length))
+}
+const pendingRequests = computed(() =>
+  runtime.requestsFor(props.session.id).filter((request) => request.status === 'pending'),
 )
-const workspaceStatus = computed(() => git.statusFor(props.session.id, 'workspace'))
+async function stopTraceRun() {
+  try {
+    await runtime.cancelRun(props.session.id)
+  } catch (error) {
+    notice.error(error instanceof Error ? error.message : String(error))
+  }
+}
+
+function openTrace(runId: string) {
+  traceRunId.value = runId
+  view.value = 'trace'
+}
+
+function switchTab(event: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  view.value =
+    event.key === 'Home'
+      ? 'conversation'
+      : event.key === 'End'
+        ? 'trace'
+        : view.value === 'conversation'
+          ? 'trace'
+          : 'conversation'
+  nextTick(() => document.getElementById(`session-tab-${view.value}`)?.focus())
+}
 
 async function refreshGit() {
   try {
@@ -90,7 +125,12 @@ async function refreshGit() {
   }
 }
 
-onMounted(refreshGit)
+onMounted(async () => {
+  void refreshGit()
+  await nextTick()
+  if (!route.hash && scrollElement.value)
+    scrollElement.value.scrollTo({ top: scrollElement.value.scrollHeight, behavior: 'instant' })
+})
 watch(
   () => props.session.updatedAt,
   () => {
@@ -105,6 +145,7 @@ watch(
     runtime.approvalsFor(props.session.id).length,
   ],
   async () => {
+    if (view.value !== 'conversation') return
     const element = scrollElement.value
     const follow = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 240
     await nextTick()
@@ -121,97 +162,131 @@ async function respondToInput(id: string, response: unknown) {
   }
 }
 
-function decideApproval(id: string, approved: boolean) {
-  return respondToInput(id, { approved })
+async function decideApproval(id: string, approved: boolean) {
+  try {
+    await runtime.resolveApproval(id, approved)
+  } catch (error) {
+    notice.error(error instanceof Error ? error.message : String(error))
+  }
 }
 
-function statusIcon(task: TaskNode) {
-  if (task.status === 'completed') return Check
-  if (task.status === 'failed') return AlertTriangle
-  if (task.status === 'running') return Loader
-  return Clock
+async function retryRun(runId: string) {
+  try {
+    await runtime.retryRun(props.session.id, runId)
+  } catch (error) {
+    notice.error(error instanceof Error ? error.message : String(error))
+  }
 }
 
-function activityIcon(task: TaskNode) {
-  const tool = task.tool.toLowerCase()
-  if (tool.includes('read') || tool.includes('list')) return Book
-  if (tool.includes('write') || tool.includes('edit')) return Edit
-  if (tool.includes('command') || tool.includes('execute') || tool.includes('run')) return Terminal2
-  return statusIcon(task)
-}
-
-function activityLabel(task: TaskNode) {
-  if (task.status === 'failed') return '执行失败'
-  if (task.status === 'waiting') return '等待确认'
-  if (task.status === 'running') return '正在执行'
-  const tool = task.tool.toLowerCase()
-  if (tool.includes('read') || tool.includes('list')) return '已读取文件'
-  if (tool.includes('write') || tool.includes('edit')) return '已编辑文件'
-  if (tool.includes('command') || tool.includes('execute') || tool.includes('run'))
-    return '已运行命令'
-  return '已完成任务'
+async function showRetrySource(runId: string) {
+  view.value = 'conversation'
+  await nextTick()
+  document.getElementById(`run-${runId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 </script>
 
 <template>
   <div class="conversation-view">
     <header class="conversation-header">
-      <div class="title-row">
-        <span class="folder-icon">
-          <AppIcon
-            :component="Folder"
-            :size="17"
-          />
-        </span>
-        <h1>{{ session.title }}</h1>
-      </div>
-      <div class="header-actions">
-        <NSelect
-          :value="session.workflowId"
-          :options="
-            workflows
-              .filter((item) => item.enabled)
-              .map((item) => ({ label: item.name, value: item.id }))
-          "
-          :disabled="!!activeRun"
-          size="small"
-          style="width: 180px"
-          placeholder="协作流程"
-          @update:value="changeWorkflow"
-        />
-        <NButton
-          size="small"
-          quaternary
-          :disabled="!!activeRun"
-          @click="clearContext"
-        >
-          清空上下文
-        </NButton>
-        <NBadge
-          :value="workspaceStatus?.files.length || 0"
-          :show="!!workspaceStatus?.files.length"
-          :max="99"
-        >
+      <div class="header-top">
+        <div class="title-row">
+          <h1>{{ session.title }}</h1>
+        </div>
+        <div class="header-actions">
           <NButton
-            quaternary
             size="small"
+            quaternary
             @click="showChanges = true"
           >
-            <template #icon><AppIcon :component="FileDiff" /></template>
             改动
           </NButton>
-        </NBadge>
-        <span
-          class="session-state"
-          :class="session.status"
+          <NDropdown
+            v-model:show="optionsOpen"
+            trigger="click"
+            placement="bottom-end"
+            :options="sessionOptions"
+            :node-props="
+              (option) => ({
+                role: 'menuitem',
+                'aria-disabled': option.disabled ? 'true' : 'false',
+                'aria-haspopup': option.children?.length ? 'menu' : undefined,
+              })
+            "
+            @select="selectSessionOption"
+          >
+            <NButton
+              quaternary
+              circle
+              size="small"
+              aria-label="会话选项"
+              aria-haspopup="menu"
+              :aria-expanded="optionsOpen"
+            >
+              <template #icon><AppIcon :component="Dots" /></template>
+            </NButton>
+          </NDropdown>
+        </div>
+      </div>
+      <div class="view-bar">
+        <div
+          class="view-tabs"
+          role="tablist"
+          aria-label="会话视图"
+          @keydown="switchTab"
         >
-          {{ statusText }}
-        </span>
+          <button
+            id="session-tab-conversation"
+            type="button"
+            role="tab"
+            aria-controls="session-panel-conversation"
+            :aria-selected="view === 'conversation'"
+            :tabindex="view === 'conversation' ? 0 : -1"
+            @click="view = 'conversation'"
+          >
+            对话
+          </button>
+          <button
+            id="session-tab-trace"
+            type="button"
+            role="tab"
+            aria-controls="session-panel-trace"
+            :aria-selected="view === 'trace'"
+            :tabindex="view === 'trace' ? 0 : -1"
+            @click="view = 'trace'"
+          >
+            调用轨迹
+          </button>
+        </div>
+        <button
+          v-if="view === 'trace' && pendingRequests.length"
+          type="button"
+          class="pending-shortcut"
+          @click="showRetrySource(pendingRequests[0]!.runId)"
+        >
+          <span class="state-dot" />
+          {{ pendingRequests.length }} 项等待输入
+          <small>去处理 →</small>
+        </button>
+        <NButton
+          v-if="view === 'trace' && activeRun"
+          text
+          size="small"
+          :disabled="runtime.connectionStatus !== 'connected'"
+          :loading="!!runtime.pendingCancellations[activeRun.id]"
+          @click="stopTraceRun"
+        >
+          停止运行
+        </NButton>
       </div>
     </header>
 
     <main
+      v-show="view === 'conversation'"
+      id="session-panel-conversation"
       ref="scrollElement"
+      role="tabpanel"
+      aria-labelledby="session-tab-conversation"
+      tabindex="0"
       class="conversation-scroll app-scrollbar"
     >
       <div class="conversation-column">
@@ -241,10 +316,25 @@ function activityLabel(task: TaskNode) {
         </template>
 
         <section
-          v-for="entry in timeline"
+          v-for="(entry, index) in timeline"
+          :id="`run-${entry.run.id}`"
           :key="entry.run.id"
+          :data-run-id="entry.run.id"
           class="run-section"
         >
+          <div
+            v-if="entry.run.retryOfRunId"
+            class="retry-source"
+          >
+            <span>{{ entry.run.retryTaskId ? '任务重试' : '未完成任务重试' }}</span>
+            <NButton
+              text
+              size="tiny"
+              @click="showRetrySource(entry.run.retryOfRunId)"
+            >
+              查看来源
+            </NButton>
+          </div>
           <div
             v-if="entry.user"
             class="user-block"
@@ -264,47 +354,62 @@ function activityLabel(task: TaskNode) {
             </div>
           </div>
 
-          <div
-            v-if="entry.tasks.length"
-            class="activity-feed"
-          >
-            <div class="activity-row activity-summary">
-              <AppIcon
-                :component="Book"
-                :size="17"
-              />
-              <span>已规划 {{ entry.tasks.length }} 个任务</span>
+          <div class="run-bridge">
+            <div class="agent-signature">
+              <strong>Aurora</strong>
+              <span
+                v-if="['failed', 'cancelled', 'interrupted'].includes(entry.run.status)"
+                class="bridge-state"
+                :class="entry.run.status"
+              >
+                {{
+                  {
+                    queued: '排队中',
+                    running: '执行中',
+                    waiting: '等待输入',
+                    completed: '已完成',
+                    failed: '执行失败',
+                    cancelled: '已取消',
+                    interrupted: '已中断',
+                  }[entry.run.status]
+                }}
+              </span>
             </div>
-            <div
-              v-for="task in entry.tasks"
-              :key="task.id"
-              :data-task-id="task.id"
-              class="activity-row"
-              :class="task.status"
+            <button
+              type="button"
+              class="trace-link"
+              :aria-label="`查看第 ${index + 1} 轮调用轨迹`"
+              @click="openTrace(entry.run.id)"
             >
-              <NSpin
-                v-if="task.status === 'running'"
-                :size="15"
-              />
-              <AppIcon
-                v-else
-                :component="activityIcon(task)"
-                :size="17"
-              />
-              <strong>{{ activityLabel(task) }}</strong>
-              <span>{{ task.description }}</span>
-            </div>
+              查看轨迹
+            </button>
           </div>
-
           <RunReview
             :run-id="entry.run.id"
             :status="entry.run.status"
+            reviews-only
           />
+          <NButton
+            v-if="['failed', 'cancelled', 'interrupted'].includes(entry.run.status)"
+            size="small"
+            secondary
+            :disabled="
+              runtime.connectionStatus !== 'connected' ||
+              !!activeRun ||
+              runtime.retryPendingFor(session.id)
+            "
+            :loading="runtime.retryPendingFor(session.id)"
+            aria-label="重试运行"
+            @click="retryRun(entry.run.id)"
+          >
+            重试未完成任务
+          </NButton>
 
           <ApprovalCard
             v-for="request in entry.requests"
             :key="request.id"
             :request="request"
+            :submitting="!!runtime.pendingInputs[request.id]"
             @decide="decideApproval"
             @respond="respondToInput"
           />
@@ -346,7 +451,7 @@ function activityLabel(task: TaskNode) {
             class="working-row"
           >
             <NSpin :size="16" />
-            Aurora 正在处理这个任务
+            {{ entry.run.status === 'queued' ? '排队中…' : '正在执行…' }}
           </div>
         </section>
 
@@ -355,10 +460,24 @@ function activityLabel(task: TaskNode) {
           class="working-row"
         >
           <NSpin :size="16" />
-          Aurora 正在分析并规划任务
+          正在规划…
         </div>
       </div>
     </main>
+    <div
+      v-if="view === 'trace'"
+      id="session-panel-trace"
+      role="tabpanel"
+      aria-labelledby="session-tab-trace"
+      class="trace-pane"
+      tabindex="0"
+    >
+      <TracePanel
+        :session="session"
+        :initial-run-id="traceRunId"
+        @select="traceRunId = $event"
+      />
+    </div>
     <GitChangesDrawer
       v-model:show="showChanges"
       :session="session"
@@ -371,160 +490,231 @@ function activityLabel(task: TaskNode) {
   display: grid;
   width: 100%;
   height: 100%;
-  grid-template-rows: 56px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }
 .conversation-header {
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+.header-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 22px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  gap: 12px;
+  min-height: 42px;
+  padding: 6px 24px;
 }
 .title-row {
   display: flex;
+  flex: 1;
   min-width: 0;
   align-items: center;
-  gap: 9px;
-}
-.folder-icon {
-  display: grid;
-  width: 29px;
-  height: 29px;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--surface-muted);
-  color: var(--text-muted);
+  gap: 11px;
 }
 .title-row h1 {
   overflow: hidden;
   margin: 0;
-  font-size: 14px;
-  font-weight: 650;
+  font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
+  flex-shrink: 0;
 }
-.session-state {
-  padding: 3px 8px;
-  border-radius: 99px;
-  background: var(--surface-muted);
+.view-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 38px;
+  padding: 0 24px;
+  gap: 16px;
+}
+.view-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 23px;
+  align-self: stretch;
+}
+.view-tabs > button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  padding: 0 1px;
+  background: transparent;
   color: var(--text-muted);
-  font-size: 11px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
 }
-.session-state.running,
-.session-state.queued {
+.view-tabs > button[aria-selected='true'] {
+  color: var(--text);
+  font-weight: 600;
+}
+.view-tabs > button[aria-selected='true']::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 3px 3px 0 0;
+}
+.pending-shortcut {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
   color: var(--accent);
+  background: var(--accent-soft);
+  border: 0;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
 }
-.session-state.waiting {
-  color: #b7791f;
+.pending-shortcut small {
+  font-size: 10px;
+  margin-left: 5px;
 }
-.session-state.completed {
-  color: #16845b;
+.state-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
 }
-.session-state.failed {
-  color: #c33f3f;
+.trace-pane {
+  overflow: hidden;
+  min-height: 0;
 }
 .conversation-scroll {
   overflow: auto;
-  padding: 36px 34px 190px;
+  padding: 28px clamp(24px, 5vw, 80px) 170px;
 }
 .conversation-column {
-  width: min(980px, 100%);
+  width: min(800px, 100%);
   margin: 0 auto;
 }
 .run-section {
-  padding: 0 0 31px;
-  margin: 0 0 31px;
+  position: relative;
+  padding: 0 0 28px;
+  margin: 0 0 28px;
   border-bottom: 1px solid var(--border);
+  scroll-margin-top: 22px;
 }
 .run-section:last-of-type {
   border-bottom: 0;
+  margin-bottom: 0;
 }
 .user-block {
-  margin: 0 0 30px auto;
-  width: fit-content;
-  max-width: 78%;
+  margin: 0 0 20px;
+  max-width: 100%;
 }
 .user-message {
-  padding: 10px 15px;
-  border-radius: 17px;
-  background: var(--surface-muted);
-  font-size: 14px;
+  font-size: 16px;
+  font-weight: 500;
   line-height: 1.65;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .message-files {
   display: flex;
-  justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 6px;
+  gap: 8px;
+  margin-top: 12px;
 }
 .message-files span {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
   color: var(--text-muted);
   font-size: 10px;
 }
 .message-files svg {
   width: 13px;
 }
-.activity-feed {
-  display: grid;
-  gap: 15px;
-  margin: 4px 0 27px;
-}
-.activity-row {
+.retry-source {
   display: flex;
-  min-height: 20px;
   align-items: center;
-  gap: 9px;
+  gap: 12px;
+  margin-bottom: 14px;
   color: var(--text-muted);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 11px;
 }
-.activity-row :deep(svg) {
-  flex: 0 0 auto;
+.run-bridge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 20px 0 14px;
 }
-.activity-row strong {
+.agent-signature {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-signature strong {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.bridge-state {
+  padding-left: 8px;
+  margin-left: 2px;
+  border-left: 1px solid var(--border);
   color: var(--text-muted);
-  font-weight: 600;
+  font-size: 10px;
 }
-.activity-row span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.bridge-state.running {
+  color: var(--accent);
 }
-.activity-row.failed,
-.activity-row.failed strong {
-  color: #c33f3f;
+.bridge-state.failed {
+  color: var(--danger);
 }
-.activity-row.waiting,
-.activity-row.waiting strong {
-  color: #b7791f;
+.trace-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  background: transparent;
+  color: var(--text-muted);
+  border: 0;
+  font-size: 11px;
+  cursor: pointer;
 }
-.activity-summary {
-  margin-bottom: 2px;
-}
-.activity-summary span {
-  font-weight: 600;
+.trace-link:hover {
+  color: var(--accent);
 }
 .assistant-message {
   position: relative;
   margin: 0 0 25px;
+  padding-left: 0;
+}
+.conversation-view :deep(pre),
+.conversation-view :deep(code) {
+  font-family: var(--font-ui);
 }
 .assistant-message :deep(.markdown-content) {
-  font-size: 15.5px;
-  line-height: 1.85;
+  font-size: 14px;
+  line-height: 1.95;
 }
 .assistant-message :deep(.markdown-content p) {
-  margin-bottom: 17px;
+  margin-bottom: 16px;
+}
+.assistant-message :deep(.markdown-content h1),
+.assistant-message :deep(.markdown-content h2) {
+  font-size: 19px;
 }
 .cursor {
   display: inline-block;
@@ -539,24 +729,30 @@ function activityLabel(task: TaskNode) {
     opacity: 0;
   }
 }
+@media (prefers-reduced-motion: reduce) {
+  .cursor {
+    animation: none;
+  }
+}
 .error-message {
   display: flex;
   gap: 9px;
-  margin: 10px 0 22px;
+  margin: 16px 0 22px;
   padding: 12px;
-  border: 1px solid rgb(209 67 67 / 30%);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
   border-radius: 9px;
-  background: rgb(209 67 67 / 7%);
-  color: #c33f3f;
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  color: var(--danger);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 .tool-message {
   margin: 8px 0 20px;
-  padding-left: 26px;
+  padding-left: 15px;
   border-left: 2px solid var(--border);
 }
 .tool-message :deep(.markdown-content) {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .working-row {
@@ -565,41 +761,49 @@ function activityLabel(task: TaskNode) {
   gap: 9px;
   margin: 18px 0;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 12px;
+}
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
 }
 @media (max-width: 680px) {
-  .conversation-view {
-    grid-template-rows: auto minmax(0, 1fr);
+  .header-top {
+    padding: 6px 16px;
   }
-  .conversation-header {
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 10px 14px;
+  .view-bar {
+    padding: 0 16px;
   }
-  .header-actions {
-    flex-wrap: wrap;
+  .view-tabs {
+    gap: 20px;
   }
-  .title-row {
-    width: 100%;
+  .pending-shortcut {
+    font-size: 10px;
+  }
+  .pending-shortcut small {
+    display: none;
   }
   .conversation-scroll {
-    padding: 26px 16px 176px;
+    padding: 24px 20px 170px;
   }
-  .conversation-column {
-    width: 100%;
+  .user-message {
+    font-size: 16px;
   }
-  .user-block {
-    max-width: 92%;
+  .assistant-message {
+    padding-left: 0;
   }
-  .activity-row span:last-child {
-    white-space: normal;
+  .run-bridge {
+    margin-bottom: 19px;
+  }
+  .trace-link {
+    gap: 5px;
   }
   .assistant-message :deep(.markdown-content) {
-    font-size: 14.5px;
+    font-size: 14px;
   }
   .run-section {
-    margin-bottom: 24px;
-    padding-bottom: 24px;
+    margin-bottom: 26px;
+    padding-bottom: 26px;
   }
 }
 </style>

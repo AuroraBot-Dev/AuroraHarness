@@ -1,4 +1,4 @@
-"""面向桌面壳的运行时协议处理器。"""
+"""处理跨传输共享的运行时请求、响应和事件。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,13 @@ from datetime import UTC, datetime
 from typing import Any, TextIO
 from uuid import uuid4
 
-from aurora.agent.orchestration.runtime import AgentRuntime, RunUpdate, validate_workspace
+from aurora.agent.orchestration.runtime import (
+    AgentRuntime,
+    RunControlError,
+    RunExecutionError,
+    RunUpdate,
+    validate_workspace,
+)
 from aurora.common.protocol import PROTOCOL_VERSION
 from aurora.common.text import sanitize_text, sanitize_value
 
@@ -26,9 +32,15 @@ class RuntimeApi:
 
     def __init__(self, runtime: AgentRuntime | None = None) -> None:
         self._runtime = runtime or AgentRuntime()
-        from .persistence import PersistenceApi
+        from .persistence_api import PersistenceApi
 
         self._persistence = PersistenceApi(self._runtime)
+
+    def subscribe(self, emit):
+        """订阅请求结束后仍可能到达的运行时通知。"""
+        return self._runtime.events.subscribe(
+            lambda name, payload: emit(_wire_event(name, payload))
+        )
 
     def handle(self, request: Mapping[str, Any]) -> list[dict[str, Any]]:
         """处理单个请求并返回响应与后续事件。"""
@@ -41,6 +53,8 @@ class RuntimeApi:
                 raise ValueError("params 必须是对象")
             result, events = self._dispatch(method, params)
             return [{"id": request_id, "result": result}, *events]
+        except (RunControlError, RunExecutionError) as exc:
+            return [_error(request_id, exc.code, str(exc))]
         except MethodNotFoundError as exc:
             return [_error(request_id, "method_not_found", self._runtime.redact(str(exc)))]
         except McpClientError as exc:
@@ -101,21 +115,35 @@ class RuntimeApi:
             params = request.get("params", {})
             if not isinstance(params, Mapping):
                 raise ValueError("params 必须是对象")
-            if method not in {"run.start", "run.resume"}:
+            if method not in {"run.start", "run.resume", "run.retry", "approval.resolve"}:
                 for frame in self.handle_wire(request):
                     emit(frame)
                 return
-            result, events = self._dispatch_stream(method, params, emit)
-            emit(
-                {
-                    "protocol_version": PROTOCOL_VERSION,
-                    "request_id": request_id,
-                    "ok": True,
-                    "result": result,
-                }
-            )
+
+            def acknowledge(result=None):
+                emit(
+                    {
+                        "protocol_version": PROTOCOL_VERSION,
+                        "request_id": request_id,
+                        "ok": True,
+                        "result": result if result is not None else {"accepted": True},
+                    }
+                )
+
+            result, events = self._dispatch_stream(method, params, emit, acknowledge)
+            if method not in {"approval.resolve", "run.retry"}:
+                emit(
+                    {
+                        "protocol_version": PROTOCOL_VERSION,
+                        "request_id": request_id,
+                        "ok": True,
+                        "result": result,
+                    }
+                )
             for event in events:
                 emit(_wire_event(str(event["event"]), event.get("data", {})))
+        except (RunControlError, RunExecutionError) as exc:
+            emit(_wire_error(request_id, exc.code, str(exc)))
         except MethodNotFoundError as exc:
             emit(_wire_error(request_id, "method_not_found", self._runtime.redact(str(exc))))
         except McpClientError as exc:
@@ -130,23 +158,23 @@ class RuntimeApi:
         method: str,
         params: Mapping[str, Any],
         emit: Callable[[dict[str, Any]], None],
+        on_accepted=None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """执行运行方法并实时转换图节点事件。"""
-        session_id = _required_string(params, "sessionId")
+        if method == "approval.resolve":
+            session_id, run_id, approval_id, approved = self._approval_target(params)
+        elif method == "run.retry":
+            session_id = _identifier(params, "session_id", "sessionId")
+            run_id = _identifier(params, "run_id", "runId")
+            self._runtime.require_run(session_id, run_id)
+        else:
+            session_id = _required_string(params, "sessionId")
         session = self._runtime.get_session(session_id)
-        tasks: dict[str, Mapping[str, Any]] = {}
-        started: set[str] = set()
         message_id: str | None = None
 
         def progress(run_id: str, node: str, update: Mapping[str, Any]) -> None:
             nonlocal message_id
             base = {"sessionId": session_id, "runId": run_id}
-
-            def emit_task_starts() -> None:
-                for task_id, task in tasks.items():
-                    if task_id not in started:
-                        started.add(task_id)
-                        emit(_wire_event("task.started", {**base, "taskId": task_id, "task": task}))
 
             if node.startswith(("stage.", "artifact.", "review.")):
                 emit(_wire_event(node, {**base, **dict(update)}))
@@ -156,35 +184,7 @@ class RuntimeApi:
                 return
             if node == "plan":
                 planned = [dict(item) for item in update.get("tasks", [])]
-                tasks.clear()
-                started.clear()
-                tasks.update({str(item.get("id")): item for item in planned})
                 emit(_wire_event("plan.created", {**base, "tasks": planned}))
-                return
-            if node == "clarify" and not update.get("clarification_needed", False):
-                emit_task_starts()
-                return
-            if node == "dispatch":
-                emit_task_starts()
-                return
-            if node == "execute":
-                for result in update.get("results", []):
-                    task_id = str(result.get("task_id", ""))
-                    task = dict(tasks.get(task_id, {}))
-                    ok = bool(result.get("ok"))
-                    event = "task.completed" if ok else "task.failed"
-                    emit(
-                        _wire_event(
-                            event,
-                            {
-                                **base,
-                                "taskId": task_id,
-                                "task": {**task, "status": "completed" if ok else "failed"},
-                                "output": result.get("output", ""),
-                                "error": "" if ok else result.get("output", ""),
-                            },
-                        )
-                    )
                 return
             if node == "summarize":
                 report = str(update.get("report", ""))
@@ -212,6 +212,51 @@ class RuntimeApi:
                 request_key=_optional_string(params, "requestKey"),
                 mode=str(params.get("mode", "run")),
             )
+        elif method == "run.retry":
+            retried_id = None
+
+            def created(new_id):
+                nonlocal retried_id
+                retried_id = new_id
+                if on_accepted:
+                    on_accepted({"run": self._retry_summary(new_id)})
+
+            task_id = (
+                _identifier(params, "task_id", "taskId")
+                if "task_id" in params or "taskId" in params
+                else None
+            )
+            try:
+                update = session.retry(run_id, task_id, progress, created)
+            except Exception:
+                if retried_id is None:
+                    raise
+                update = session._result(retried_id)
+                if update.status not in {"completed", "failed", "cancelled", "interrupted"}:
+                    raise
+        elif method == "approval.resolve":
+            accepted = False
+
+            def acknowledge_approval():
+                nonlocal accepted
+                accepted = True
+                if on_accepted:
+                    on_accepted()
+
+            try:
+                update = session.resume(
+                    run_id,
+                    {"approved": approved},
+                    on_progress=progress,
+                    approval_id=approval_id,
+                    on_accepted=acknowledge_approval,
+                )
+            except Exception:
+                if not accepted:
+                    raise
+                update = session._result(run_id)
+                if update.status not in {"completed", "failed", "cancelled", "interrupted"}:
+                    raise
         else:
             update = session.resume(
                 _required_string(params, "runId"),
@@ -221,12 +266,70 @@ class RuntimeApi:
             )
         return _frames_for_update(update)
 
+    def _retry_summary(self, run_id):
+        """返回重试创建时的规范运行摘要。"""
+        from aurora.agent.store.model import Run
+
+        row = self._runtime.records.get(Run, run_id)
+        return {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "objective": row["goal"],
+            "status": row["status"],
+            "retry_of_run_id": row["retry_of_run_id"],
+            "retry_task_id": row["retry_task_id"],
+            "error": row["error"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _approval_target(self, params):
+        """校验规范审批参数及归属，重复和过期请求不重新执行。"""
+        from sqlalchemy import select
+
+        from aurora.agent.store.model import Interaction
+
+        session_id = _identifier(params, "session_id", "sessionId")
+        run_id = _identifier(params, "run_id", "runId")
+        approval_id = _identifier(params, "approval_id", "approvalId")
+        approved = params.get("approved")
+        if not isinstance(approved, bool):
+            raise ValueError("approved 必须是布尔值")
+        self._runtime.require_run(session_id, run_id)
+        row = self._runtime.records.db.first(
+            select(Interaction).where(
+                Interaction.id == approval_id,
+                Interaction.run_id == run_id,
+                Interaction.kind == "approval",
+            )
+        )
+        if row is None:
+            raise RunControlError("APPROVAL_NOT_FOUND", "审批不存在或不属于当前运行")
+        if row["status"] != "pending":
+            code = "APPROVAL_EXPIRED" if row["status"] == "expired" else "APPROVAL_ALREADY_RESOLVED"
+            raise RunControlError(
+                code, "审批已过期" if code == "APPROVAL_EXPIRED" else "审批已解决"
+            )
+        return session_id, run_id, approval_id, approved
+
     def _dispatch(
         self,
         method: str,
         params: Mapping[str, Any],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """执行一个协议方法。"""
+        if method == "run.retry":
+            result, events = self._dispatch_stream(method, params, lambda frame: None)
+            return {"run": self._retry_summary(result["runId"])}, events
+        if method == "approval.resolve":
+            _, events = self._dispatch_stream(method, params, lambda frame: None)
+            return {"accepted": True}, events
+        if method == "run.cancel":
+            session_id = _identifier(params, "session_id", "sessionId")
+            run_id = _identifier(params, "run_id", "runId")
+            accepted, update = self._runtime.cancel_run(session_id, run_id)
+            events = _frames_for_update(update)[1] if update is not None else []
+            return {"accepted": accepted}, events
         if method in self._persistence.capabilities:
             return self._persistence.dispatch(method, params), []
         if method == "runtime.initialize":
@@ -241,6 +344,9 @@ class RuntimeApi:
                     "session.create",
                     "run.start",
                     "run.resume",
+                    "run.cancel",
+                    "run.retry",
+                    "approval.resolve",
                     "session.close",
                     "git.status",
                     "git.diff",
@@ -365,25 +471,35 @@ def serve_ndjson(api: RuntimeApi, input_stream: TextIO, output_stream: TextIO) -
         with lock:
             _write_frame(output_stream, frame)
 
-    with ThreadPoolExecutor(max_workers=4) as workers:
-        for line in input_stream:
-            if not line.strip():
-                continue
-            try:
-                request = json.loads(line)
-                if not isinstance(request, Mapping):
-                    raise ValueError("请求必须是 JSON 对象")
-                if "request_id" in request or "protocol_version" in request:
-                    if request.get("method") in {"run.start", "run.resume", "agent.test"}:
-                        workers.submit(api.process_wire, request, emit)
-                    else:
-                        api.process_wire(request, emit)
+    unsubscribe = api.subscribe(emit)
+    try:
+        with ThreadPoolExecutor(max_workers=4) as workers:
+            for line in input_stream:
+                if not line.strip():
                     continue
-                frames = api.handle(request)
-            except (json.JSONDecodeError, ValueError) as exc:
-                frames = [_error(None, "invalid_json", str(exc))]
-            for frame in frames:
-                emit(frame)
+                try:
+                    request = json.loads(line)
+                    if not isinstance(request, Mapping):
+                        raise ValueError("请求必须是 JSON 对象")
+                    if "request_id" in request or "protocol_version" in request:
+                        if request.get("method") in {
+                            "run.start",
+                            "run.resume",
+                            "run.retry",
+                            "agent.test",
+                            "approval.resolve",
+                        }:
+                            workers.submit(api.process_wire, request, emit)
+                        else:
+                            api.process_wire(request, emit)
+                        continue
+                    frames = api.handle(request)
+                except (json.JSONDecodeError, ValueError) as exc:
+                    frames = [_error(None, "invalid_json", str(exc))]
+                for frame in frames:
+                    emit(frame)
+    finally:
+        unsubscribe()
 
 
 def _frames_for_update(update: RunUpdate) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -409,6 +525,20 @@ def _frames_for_update(update: RunUpdate) -> tuple[dict[str, Any], list[dict[str
         events.append(
             {"event": names.get(str(pending.value.get("kind")), "run.input_required"), "data": data}
         )
+        if pending.value.get("kind") == "approval":
+            events.append(
+                {
+                    "event": "approval.requested",
+                    "data": {
+                        "session_id": update.session_id,
+                        "run_id": update.run_id,
+                        **pending.to_dict(),
+                        "action": pending.value.get(
+                            "action", pending.value.get("tool", "执行受保护操作")
+                        ),
+                    },
+                }
+            )
     return result, events
 
 
@@ -425,6 +555,16 @@ def _write_frame(output_stream: TextIO, frame: Mapping[str, Any]) -> None:
         json.dumps(sanitize_value(frame), ensure_ascii=False, separators=(",", ":")) + "\n"
     )
     output_stream.flush()
+
+
+def _identifier(values: Mapping[str, Any], name: str, legacy: str) -> str:
+    """读取规范标识符并兼容旧字段，拒绝相互冲突的别名。"""
+    if name in values:
+        value = _required_string(values, name)
+        if legacy in values and _required_string(values, legacy) != value:
+            raise ValueError(f"{name} 与 {legacy} 不一致")
+        return value
+    return _required_string(values, legacy)
 
 
 def _required_string(values: Mapping[str, Any], name: str) -> str:
@@ -482,8 +622,8 @@ def _wire_event(name: str, data: Any) -> dict[str, Any]:
         "event_id": f"evt_{uuid4().hex}",
         "type": name,
         "occurred_at": datetime.now(UTC).isoformat(),
-        "session_id": payload.get("sessionId"),
-        "run_id": payload.get("runId"),
-        "task_id": payload.get("taskId"),
+        "session_id": payload.get("session_id") or payload.get("sessionId"),
+        "run_id": payload.get("run_id") or payload.get("runId"),
+        "task_id": payload.get("task_id") or payload.get("taskId"),
         "payload": payload,
     }

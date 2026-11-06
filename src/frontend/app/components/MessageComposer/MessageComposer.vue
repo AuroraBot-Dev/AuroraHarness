@@ -1,20 +1,30 @@
 <script setup lang="ts">
 import { NButton, NInput } from 'naive-ui'
-import { ArrowUp } from '~/utils/icons'
+import { ArrowUp, Stop } from '~/utils/icons'
 import type { AttachmentRef } from '~/types/agent'
 
 const props = withDefaults(
   defineProps<{
     disabled?: boolean
+    compact?: boolean
     loading?: boolean
+    canStop?: boolean
+    stopping?: boolean
     placeholder?: string
   }>(),
   { placeholder: '描述你希望 Agent 完成的任务' },
 )
 const value = defineModel<string>({ default: '' })
-const emit = defineEmits<{ submit: [objective: string, attachments: AttachmentRef[]] }>()
+const emit = defineEmits<{
+  submit: [objective: string, attachments: AttachmentRef[]]
+  stop: []
+}>()
 const resolvedPlaceholder = computed(() =>
-  props.loading ? 'Aurora 正在处理任务…' : props.placeholder,
+  props.stopping
+    ? '正在停止，等待运行时确认…'
+    : props.loading
+      ? 'Aurora 正在处理任务…'
+      : props.placeholder,
 )
 
 function submit() {
@@ -35,7 +45,7 @@ function onKeydown(event: KeyboardEvent) {
 <template>
   <div
     class="composer-shell"
-    :class="{ disabled }"
+    :class="{ disabled, compact }"
   >
     <div
       v-if="$slots.context"
@@ -60,9 +70,20 @@ function onKeydown(event: KeyboardEvent) {
       >
         提示词库
       </NuxtLink>
-      <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
       <NButton
-        v-if="loading"
+        v-if="loading && canStop"
+        circle
+        secondary
+        size="small"
+        :disabled="disabled || stopping"
+        :loading="stopping"
+        :aria-label="stopping ? '正在停止' : '停止运行'"
+        @click="emit('stop')"
+      >
+        <template #icon><AppIcon :component="Stop" /></template>
+      </NButton>
+      <NButton
+        v-else-if="loading"
         circle
         secondary
         size="small"
@@ -77,6 +98,7 @@ function onKeydown(event: KeyboardEvent) {
         size="small"
         :disabled="disabled || !value.trim()"
         aria-label="发送"
+        title="发送（Enter）"
         @click="submit"
       >
         <template #icon><AppIcon :component="ArrowUp" /></template>
@@ -87,23 +109,23 @@ function onKeydown(event: KeyboardEvent) {
 
 <style scoped>
 .composer-shell {
-  padding: 20px 24px 16px;
-  border: 1px solid var(--glass-edge);
-  border-radius: 24px;
-  background: var(--glass-fill);
-  box-shadow: var(--material-shadow);
-  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(135%);
-  backdrop-filter: blur(var(--material-blur)) saturate(135%);
-  transition:
-    border-color 180ms ease,
-    box-shadow 180ms ease;
+  padding: 14px 16px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  transition: border-color 180ms ease;
 }
 
 .composer-shell:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--glass-edge));
-  box-shadow:
-    var(--material-shadow),
-    0 0 0 3px color-mix(in srgb, var(--accent) 5%, transparent);
+  border-color: var(--accent);
+}
+
+.composer-shell:not(.compact) {
+  background: var(--glass-fill);
+  border-radius: 24px;
+  box-shadow: var(--material-shadow);
+  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(135%);
+  backdrop-filter: blur(var(--material-blur)) saturate(135%);
 }
 
 .composer-context {
@@ -134,7 +156,11 @@ function onKeydown(event: KeyboardEvent) {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding-top: 14px;
+  padding-top: 6px;
+}
+
+.composer-footer :deep(button:last-child) {
+  margin-left: auto;
 }
 
 .prompt-shortcut {
@@ -146,22 +172,9 @@ function onKeydown(event: KeyboardEvent) {
   color: var(--accent);
 }
 
-.composer-hint {
-  flex: 1;
-  color: var(--text-muted);
-  font-size: 10px;
-  text-align: right;
-}
-
 @media (max-width: 620px) {
   .composer-shell {
-    padding: 18px;
-    border-radius: 20px;
-  }
-
-  .composer-hint {
-    visibility: hidden;
-    font-size: 0;
+    padding: 12px 14px 10px;
   }
 }
 </style>

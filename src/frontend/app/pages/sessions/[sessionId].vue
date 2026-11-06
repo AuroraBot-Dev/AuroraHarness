@@ -9,15 +9,27 @@ const message = useMessage()
 const sessionId = computed(() => String(route.params.sessionId ?? ''))
 const session = computed(() => sessions.getSession(sessionId.value))
 const loading = ref(false)
+const view = ref<'conversation' | 'trace'>('conversation')
 const notFound = ref(false)
 const running = computed(() => !!session.value && sessions.isRunning(session.value.id))
+const activeRunId = computed(() => runtime.activeRunId(sessionId.value))
+const stopping = computed(() => !!runtime.pendingCancellations[activeRunId.value])
+
+async function stop() {
+  try {
+    await runtime.cancelRun(sessionId.value)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
+  }
+}
 
 async function loadSession(id: string) {
+  view.value = 'conversation'
   sessions.setActive(id)
   notFound.value = false
   loading.value = true
   try {
-    await sessions.load(id)
+    runtime.syncApprovals(await sessions.load(id))
   } catch {
     notFound.value = true
   } finally {
@@ -46,8 +58,14 @@ async function submit(objective: string, attachments: AttachmentRef[]) {
       <NSpin size="large" />
     </div>
     <template v-else-if="session">
-      <ConversationView :session="session" />
-      <div class="session-composer">
+      <ConversationView
+        v-model:view="view"
+        :session="session"
+      />
+      <div
+        v-show="view === 'conversation'"
+        class="session-composer"
+      >
         <NAlert
           v-if="runtime.connectionStatus === 'disconnected'"
           type="warning"
@@ -57,10 +75,14 @@ async function submit(objective: string, attachments: AttachmentRef[]) {
           运行时已断开。历史仍可浏览，恢复连接后可继续对话。
         </NAlert>
         <MessageComposer
+          compact
           :disabled="runtime.connectionStatus !== 'connected'"
           :loading="running"
+          :can-stop="!!activeRunId"
+          :stopping="stopping"
           placeholder="继续这个会话…"
           @submit="submit"
+          @stop="stop"
         />
       </div>
     </template>

@@ -10,6 +10,10 @@ import type {
 } from '~/types/agent'
 
 type Json = Record<string, unknown>
+export const isTerminalStatus = (status: string) =>
+  ['completed', 'failed', 'cancelled', 'interrupted'].includes(status)
+export const isTerminalTaskStatus = (status: string) =>
+  status === 'blocked' || isTerminalStatus(status)
 const text = (value: unknown, fallback = '') => (typeof value === 'string' ? value : fallback)
 const list = (value: unknown): Json[] =>
   Array.isArray(value)
@@ -17,6 +21,10 @@ const list = (value: unknown): Json[] =>
     : []
 const choice = <T extends string>(value: unknown, values: readonly T[], fallback: T): T =>
   typeof value === 'string' && values.includes(value as T) ? (value as T) : fallback
+const taskIds = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? [...new Set(value.filter((id): id is string => typeof id === 'string' && !!id))]
+    : []
 
 export function normalizeAttachment(raw: Json): AttachmentRef {
   return {
@@ -36,7 +44,7 @@ export function normalizeMessage(raw: Json, sessionId: string): ConversationMess
     role: choice(raw.role, ['user', 'assistant', 'system', 'tool'], 'system'),
     content: text(raw.content),
     createdAt: text(raw.created_at ?? raw.createdAt, new Date().toISOString()),
-    status: choice(raw.status, ['streaming', 'completed', 'failed'], 'completed'),
+    status: choice(raw.status, ['streaming', 'completed', 'failed', 'cancelled'], 'completed'),
     kind: choice(raw.kind, ['message', 'report', 'error', 'tool'], 'message'),
     agentRunId: text(raw.agentRunId ?? raw.agent_run_id) || null,
     visibility: choice(raw.visibility, ['public', 'internal'] as const, 'public'),
@@ -69,12 +77,24 @@ export function normalizeTask(raw: Json, sessionId: string, runId = ''): TaskNod
     sessionId: text(raw.session_id ?? raw.sessionId, sessionId),
     runId: text(raw.run_id ?? raw.runId, runId),
     parentId: text(raw.parent_id ?? raw.parentId) || null,
+    dependsOn: taskIds(raw.dependsOn ?? raw.depends_on),
+    blockedBy: taskIds(raw.blockedBy ?? raw.blocked_by),
+    retryOfTaskId: text(raw.retry_of_task_id ?? raw.retryOfTaskId ?? raw.source_task_id) || null,
     description: text(raw.description, '未命名任务'),
     tool: text(raw.tool),
     effort: choice(raw.effort, ['low', 'medium', 'high'], 'medium'),
     status: choice(
       raw.status,
-      ['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted'],
+      [
+        'queued',
+        'running',
+        'waiting',
+        'completed',
+        'failed',
+        'blocked',
+        'cancelled',
+        'interrupted',
+      ],
       'queued',
     ),
     output: text(raw.output),
@@ -122,10 +142,14 @@ export function normalizeSession(raw: Json): SessionRecord {
       .map((item) => normalizeTask(item, id, latestRun))
       .concat(nestedTasks),
     approvals: list(raw.approvals).map((item) => ({
-      id: text(item.id),
+      id: text(item.interruptId ?? item.interrupt_id ?? item.id),
+      approvalId: text(item.approval_id ?? item.approvalId ?? item.id),
+      expiresAt: text(item.expires_at ?? item.expiresAt) || null,
+      resolvedAt: text(item.resolved_at ?? item.resolvedAt) || null,
+      resolution: text(item.resolution) || null,
       sessionId: text(item.sessionId ?? item.session_id, id),
       runId: text(item.runId ?? item.run_id),
-      taskId: text(item.task_id) || null,
+      taskId: text(item.task_id ?? item.taskId) || null,
       kind: choice(
         item.kind,
         ['approval', 'clarification', 'evaluation', 'decision'] as const,
@@ -133,7 +157,7 @@ export function normalizeSession(raw: Json): SessionRecord {
       ),
       previewRequired: Boolean(item.previewRequired),
       question: text(item.question),
-      interruptId: text(item.interruptId),
+      interruptId: text(item.interruptId ?? item.interrupt_id),
       actions: Array.isArray(item.actions) ? item.actions.map(String) : undefined,
       action: text(item.action ?? item.tool),
       risk: text(item.risk),

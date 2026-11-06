@@ -27,9 +27,11 @@ from .model import (
     ModelProvider,
     Project,
     Run,
+    RunCheckpoint,
     RunEvent,
     Setting,
     Task,
+    ToolCall,
     Workflow,
     WorkflowStep,
 )
@@ -65,6 +67,20 @@ TABLES = {
     "workflow": (Workflow, {"name", "kind", "max_revisions", "enabled"}),
 }
 
+CHECKPOINT_VERSION = 1
+
+
+def _decode_checkpoint(encoded: str) -> dict | None:
+    """识别可解析的检查点对象。"""
+    try:
+        payload = json.loads(encoded)
+        if isinstance(payload, dict):
+            json.dumps(payload, allow_nan=False)
+            return payload
+    except (ValueError, TypeError, RecursionError):
+        pass
+    return None
+
 
 def decode(row: Mapping[str, Any]) -> dict[str, Any]:
     """展开数据库中的 JSON 列。"""
@@ -73,6 +89,14 @@ def decode(row: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in row.items()
         if key.endswith("_json")
     } | {key: value for key, value in row.items() if not key.endswith("_json")}
+
+
+def task_links(task, sibling_ids):
+    """将当前角色计划的依赖键转换为持久任务 ID。"""
+    return {
+        field: [sibling_ids[key] for key in task[source] or [] if key in sibling_ids]
+        for field, source in (("dependsOn", "depends_on"), ("blockedBy", "blocked_by"))
+    }
 
 
 def safe_data(value):
@@ -193,31 +217,101 @@ class Records:
             )
             self.set_setting("default_workflow_id", workflow["id"])
 
-    def recover(self):
-        """把上一进程遗留的活动运行标记为中断。"""
+    def save_checkpoint(self, run_id: str, payload: dict) -> None:
+        """原子替换本轮的 JSON 检查点。"""
+        if not isinstance(payload, dict):
+            raise ValueError("检查点必须为 JSON 对象")
+        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with self.db.transaction() as session:
+            session.merge(
+                RunCheckpoint(run_id=run_id, version=CHECKPOINT_VERSION, payload_json=encoded)
+            )
+            session.flush()
+
+    def load_checkpoint(self, run_id: str) -> dict | None:
+        """读取受支持版本的检查点对象。"""
+        with self.db.transaction() as session:
+            row = session.get(RunCheckpoint, run_id)
+            if row is None or row.version != CHECKPOINT_VERSION:
+                return None
+            return _decode_checkpoint(row.payload_json)
+
+    def delete_checkpoint(self, run_id: str) -> None:
+        """移除已消费或失效的检查点。"""
+        self.db.execute(delete(RunCheckpoint).where(RunCheckpoint.run_id == run_id))
+
+    def checkpoint_run_ids(self) -> list[str]:
+        """列出需要校验的候选运行。"""
+        with self.db.transaction() as session:
+            return list(
+                session.scalars(select(RunCheckpoint.run_id).order_by(RunCheckpoint.run_id))
+            )
+
+    def recover(self, preserved_run_ids=()):
+        """保留已验证的等待运行并中断其他遗留执行。"""
         stamp = now()
         with self.db.transaction() as connection:
+            candidates = connection.execute(
+                select(RunCheckpoint.run_id, RunCheckpoint.payload_json)
+                .join(Run, RunCheckpoint.run_id == Run.id)
+                .where(
+                    Run.status == "waiting",
+                    RunCheckpoint.version == CHECKPOINT_VERSION,
+                    RunCheckpoint.run_id.in_(tuple(preserved_run_ids)),
+                )
+            )
+            kept = {run_id for run_id, data in candidates if _decode_checkpoint(data) is not None}
+            connection.execute(delete(RunCheckpoint).where(RunCheckpoint.run_id.not_in(kept)))
+            connection.execute(
+                orm_update(ToolCall)
+                .where(ToolCall.status == "running", ToolCall.run_id.not_in(kept))
+                .values(status="interrupted", ended_at=stamp)
+            )
             connection.execute(
                 orm_update(AgentRun)
-                .where(AgentRun.status.in_(("queued", "running", "waiting")))
+                .where(
+                    AgentRun.status.in_(("queued", "running", "waiting")),
+                    AgentRun.run_id.not_in(kept),
+                )
                 .values(status="interrupted", updated_at=stamp)
             )
             connection.execute(
                 orm_update(Task)
-                .where(Task.status.in_(("queued", "running", "waiting")))
+                .where(
+                    Task.status.in_(("queued", "running", "waiting")),
+                    Task.agent_run_id.not_in(select(AgentRun.id).where(AgentRun.run_id.in_(kept))),
+                )
                 .values(status="interrupted", updated_at=stamp)
             )
             connection.execute(
                 orm_update(Interaction)
-                .where(Interaction.status == "pending")
+                .where(
+                    Interaction.status == "pending",
+                    Interaction.kind == "approval",
+                    Interaction.run_id.not_in(kept),
+                )
+                .values(
+                    resolution="runtime_restart",
+                    resolved_at=stamp,
+                    response_json=dumps({"approved": False}),
+                )
+            )
+            connection.execute(
+                orm_update(Interaction)
+                .where(Interaction.status == "pending", Interaction.run_id.not_in(kept))
                 .values(status="expired", updated_at=stamp)
             )
             connection.execute(
-                orm_update(Message).where(Message.status == "streaming").values(status="failed")
+                orm_update(Message)
+                .where(
+                    Message.status == "streaming",
+                    Message.run_id.is_(None) | Message.run_id.not_in(kept),
+                )
+                .values(status="failed")
             )
             connection.execute(
                 orm_update(Run)
-                .where(Run.status.in_(("queued", "running", "waiting")))
+                .where(Run.status.in_(("queued", "running", "waiting")), Run.id.not_in(kept))
                 .values(
                     status="interrupted", error="运行时已重启", updated_at=stamp, ended_at=stamp
                 )
@@ -404,20 +498,24 @@ class Records:
         for step in steps:
             if not step["agent_id"]:
                 continue
-            agent = self.get(Agent, step["agent_id"])
-            model = self.get(ModelConfig, agent["model_config_id"])
-            provider = self.get(ModelProvider, model["provider_id"])
-            if not all(item["enabled"] for item in (agent, model, provider)):
-                raise ValueError("流程引用了已停用的 Agent、模型或供应商")
-            if model["model_type"] == "embedding":
-                raise ValueError("向量模型暂不支持工作流执行")
-            step["config"] = {"agent": agent, "model": model, "provider": provider}
+            step["config"] = self.agent_config(step["agent_id"])
         return {
             "workflow": workflow,
             "steps": steps,
             "sandbox_mode": sandbox_mode,
             "approval_mode": approval_mode,
         }
+
+    def agent_config(self, agent_id):
+        """读取当前可执行角色及模型，冻结时不恢复已经撤回的权限。"""
+        agent = self.get(Agent, agent_id)
+        model = self.get(ModelConfig, agent["model_config_id"])
+        provider = self.get(ModelProvider, model["provider_id"])
+        if not all(item["enabled"] for item in (agent, model, provider)):
+            raise ValueError("流程引用了已停用的 Agent、模型或供应商")
+        if model["model_type"] == "embedding":
+            raise ValueError("向量模型暂不支持工作流执行")
+        return {"agent": agent, "model": model, "provider": provider}
 
     def message(
         self,

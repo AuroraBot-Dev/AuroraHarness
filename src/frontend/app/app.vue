@@ -22,8 +22,7 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => ({
     primaryColorPressed: palette.value.pressed,
     borderRadius: '10px',
     borderRadiusSmall: '7px',
-    fontFamily:
-      '"PingFang SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif',
+    fontFamily: 'var(--font-ui)',
   },
   Button: {
     textColorPrimary: palette.value.foreground,

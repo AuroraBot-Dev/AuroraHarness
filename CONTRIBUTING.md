@@ -89,10 +89,29 @@ CI 分三条流水线（`.github/workflows/python.yml`、`rust.yml`、`frontend.
 - **不要**让 `src/rust/aurora-runtime-broker` 依赖 `tauri`。CI 会失败。
 - 新增与 Tauri 相关的耦合只能放在 `src/tauri`，并通过 `EventSink` / `SecretStore` 之类的
   trait 注入给代理。
-- 改动协议时，三处版本号必须同改：`aurora/protocol.py`、`aurora-protocol/src/lib.rs`、
+- 改动协议时，三处版本号必须同改：`aurora/common/protocol.py`、`aurora-protocol/src/lib.rs`、
   `app/utils/protocol.ts`。
 - 桌面端需要新的 Python 依赖时，加到 `src/agent/pyproject.toml` 或 `src/cli/pyproject.toml`，
   然后提交更新后的根 `uv.lock`。
+
+## Python 模块命名
+
+模块采用小写 `snake_case`，名称表达领域职责。优先使用 `workflow_session.py`、`client_factory.py` 这类可定位到实现的名称；`config.py` 用于配置结构，`runtime.py` 用于运行时生命周期管理。单复数取决于职责，不为统一后缀而重命名所有文件。
+
+| 调整前 | 当前名称 | 职责 |
+| --- | --- | --- |
+| `agent/model_access/config.py` | `client_factory.py` | 根据配置构建模型客户端 |
+| `agent/orchestration/workflows.py` | `workflow_session.py` | 管理一条持久化工作流会话 |
+| `agent/core/runtime.py` | `graph_runner.py` | 驱动图执行与中断恢复 |
+| `cli/workflow.py` | `interactions.py` | 收集终端审批、澄清与评价 |
+| `agent/capability/registry.py` | `agent_registry.py` | 可调用 Agent 的发现与连接测试 |
+| `agent/sandbox/local.py` | `local_executor.py` | 选择并驱动平台沙箱执行器 |
+| `agent/transport/api.py` | `runtime_api.py` | 运行时协议请求与事件处理 |
+| `agent/transport/persistence.py` | `persistence_api.py` | 配置、历史与产物协议处理 |
+
+命名变更需同步导入、测试、分层说明及打包入口。公共导出尽量稳定；目录职责变化时再调整包边界。能力特化实现使用 `capability/specialization.py`，Agent 发现与委派注册使用 `capability/agent_registry.py`。
+
+全仓模块职责与保留命名的理由见 [Python 模块职责清单](docs/python-modules.md)。
 
 ## 文档
 

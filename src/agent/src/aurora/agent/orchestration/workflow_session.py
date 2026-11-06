@@ -1,4 +1,4 @@
-"""执行固定的多 Agent 流程并持久化阶段、审查和交接证据。"""
+"""管理工作流会话，执行并持久化编写、审查及交接阶段。"""
 
 from __future__ import annotations
 
@@ -9,16 +9,31 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy import update as orm_update
 
+from aurora.agent.capability import CapabilityContext
 from aurora.agent.conversation.session import SYSTEM_PROMPT, _message_text
-from aurora.agent.core import build_delegation_graph
-from aurora.agent.model_access.config import build_configured_llm
-from aurora.agent.orchestration.runtime import AgentSession, RuntimeInterrupt, RunUpdate
+from aurora.agent.core import NoClarifier, TaskBudget, build_delegation_graph, validate_plan
+from aurora.agent.core.effort_policy import apply_effort, get_effort_policy, limit_model_output
+from aurora.agent.model_access.client_factory import build_configured_llm
+from aurora.agent.orchestration.model_usage import MeasuredPlanner, read_usage
+from aurora.agent.orchestration.runtime import (
+    AgentSession,
+    RunControlError,
+    RunExecutionError,
+    RuntimeInterrupt,
+    RunUpdate,
+)
+from aurora.agent.orchestration.task_events import start_task
+from aurora.agent.orchestration.task_execution import (
+    read_only_delegates,
+    record_plan,
+    record_result,
+    wait_for_input,
+)
 from aurora.agent.preview.browser import validate_preview
 from aurora.agent.safety import build_gate
 from aurora.agent.store.database import dumps, now, uid
@@ -34,6 +49,7 @@ from aurora.agent.store.model import (
     Task,
 )
 from aurora.agent.store.records import decode
+from aurora.common.cancellation import OperationCancelled, cancellation_scope, check_cancelled
 
 
 class Finding(BaseModel):
@@ -70,6 +86,7 @@ class WorkflowSession(AgentSession):
         self._active = {}
         self.feedback_sink: Any = None
         self._lock = threading.Lock()
+        self._control_lock = threading.RLock()
         self.sandbox = runtime._sandbox_factory(root=workspace.path, mode=record["sandbox_mode"])
 
     @property
@@ -90,19 +107,23 @@ class WorkflowSession(AgentSession):
             self.record["sandbox_mode"],
             self.record["approval_mode"],
         )
-        from aurora.agent.capability.registry import AgentRegistry
+        from aurora.agent.capability.agent_registry import AgentRegistry
 
         result["agents"] = AgentRegistry(self.runtime).snapshot()
         result["preview"] = self.records.get(Project, self.record["project_id"])["preview"]
+        result["execution_limits"] = self.runtime.execution_limits.to_dict()
         return result
 
     def _model(self, config):
         """为阶段创建独立的模型客户端。"""
         if self.runtime._configured_llm_factory:
-            return self.runtime._configured_llm_factory(config)
-        if self.runtime._custom_llm:
-            return self.runtime._llm_factory()
-        return build_configured_llm(config)
+            model = self.runtime._configured_llm_factory(config)
+        elif self.runtime._custom_llm:
+            model = self.runtime._llm_factory()
+        else:
+            model = build_configured_llm(config)
+        policy = config.get("effort_policy")
+        return limit_model_output(model, policy["max_output_tokens"]) if policy else model
 
     def _tools(self, agent):
         """按角色权限过滤当前运行时工具。"""
@@ -117,7 +138,18 @@ class WorkflowSession(AgentSession):
         allowed = agent["allowed_tools"]
         return {key: value for key, value in tools.items() if "*" in allowed or key in allowed}
 
-    def start(self, goal, on_progress=None, *, workflow_id=None, request_key=None, mode="run"):
+    def start(
+        self,
+        goal,
+        on_progress=None,
+        *,
+        workflow_id=None,
+        request_key=None,
+        mode="run",
+        _retry_source=None,
+        _retry_task=None,
+        _on_created=None,
+    ):
         """原子登记一轮请求并开始执行，重复请求返回原记录。"""
         from aurora.common.text import sanitize_text
 
@@ -131,20 +163,48 @@ class WorkflowSession(AgentSession):
         if existing:
             return self._result(existing["id"])
         if not self._lock.acquire(blocking=False):
+            if _retry_source:
+                raise RunControlError("RUN_ALREADY_ACTIVE", "会话正在处理请求")
             raise ValueError("会话正在处理请求")
+        state = None
         try:
-            with self.records.db.transaction():
+            with self._control_lock, self.records.db.transaction():
                 existing = self.records.db.first(
                     select(Run.id).where(Run.session_id == self.id, Run.request_key == key)
                 )
                 if existing:
                     return self._result(existing["id"])
-                self.records.require_idle(self.id)
-                snapshot = self._snapshot(workflow_id)
+                try:
+                    self.records.require_idle(self.id)
+                except ValueError as exc:
+                    if _retry_source:
+                        raise RunControlError("RUN_ALREADY_ACTIVE", str(exc)) from None
+                    raise
+                if _retry_source:
+                    from .retry_plan import build_retry
+
+                    self.record = self.records.get(ConversationSession, self.id)
+                    goal, mode, snapshot = build_retry(self, _retry_source, _retry_task)
+                else:
+                    snapshot = self._snapshot(workflow_id)
+                limits = self.runtime.execution_limits
+                snapshot["execution_limits"] = limits.to_dict()
+                if snapshot["sandbox_mode"] not in {
+                    "read-only",
+                    "workspace-write",
+                    "danger-full-access",
+                } or snapshot["approval_mode"] not in {"interactive", "always", "never"}:
+                    raise ValueError("会话执行策略无效")
+                if self.sandbox.mode != snapshot["sandbox_mode"]:
+                    self.sandbox = self.runtime._sandbox_factory(
+                        root=self.workspace.path, mode=snapshot["sandbox_mode"]
+                    )
                 config = snapshot["steps"][0]["config"]
                 history = self.records.context(
                     self.id, config["model"]["context_budget_tokens"], goal
                 )
+                if _retry_source:
+                    history = snapshot["retry"].get("history", [])
                 run_id = uid()
                 self.records.insert(
                     Run,
@@ -157,137 +217,352 @@ class WorkflowSession(AgentSession):
                     config_snapshot_json=dumps(snapshot),
                     created_at=now(),
                     updated_at=now(),
+                    retry_of_run_id=_retry_source,
+                    retry_task_id=_retry_task,
                 )
                 self.records.message(self.id, "user", goal, run_id=run_id)
                 self.records.update(ConversationSession, self.id, updated_at=now())
-            self._run_ids.add(run_id)
-            state = {
-                "snapshot": snapshot,
-                "history": history,
-                "goal": goal,
-                "mode": mode,
-                "iteration": 0,
-                "phase": "code",
-                "handoff": "",
-                "tasks": [],
-                "results": [],
-            }
-            self._active[run_id] = state
-            return self._execute(run_id, state, on_progress, started=True)
+                self._run_ids.add(run_id)
+                state = {
+                    "snapshot": snapshot,
+                    "history": history,
+                    "goal": goal,
+                    "mode": mode,
+                    "iteration": 0,
+                    "phase": "code",
+                    "handoff": "",
+                    "tasks": [],
+                    "results": [],
+                    "capabilities": self.runtime.capabilities.freeze(),
+                    "cancel_event": threading.Event(),
+                    "executing": True,
+                    "task_budget": TaskBudget(limits),
+                    "role_path": (),
+                    "delegation_depth": 0,
+                }
+                self._active[run_id] = state
+            return self._execute(run_id, state, on_progress, started=True, on_created=_on_created)
         finally:
             self._lock.release()
+            if state:
+                self._notify_timeout(state, run_id)
 
-    def resume(self, run_id, response, interrupt_id=None, on_progress=None):
+    def retry(self, source_id, task_id=None, on_progress=None, on_created=None):
+        """创建新的来源关联运行，旧检查点和历史任务保持不可变。"""
+        source = self.runtime.require_run(self.id, source_id)
+        if source["status"] in {"queued", "running", "waiting"}:
+            raise RunControlError("RUN_NOT_RETRYABLE", "来源运行仍在活动，请先停止")
+        try:
+            return self.start(
+                "重试",
+                on_progress,
+                _retry_source=source_id,
+                _retry_task=task_id,
+                _on_created=on_created,
+            )
+        except RunControlError:
+            raise
+        except ValueError as exc:
+            raise RunControlError("RUN_NOT_RETRYABLE", str(exc)) from None
+
+    def resume(
+        self,
+        run_id,
+        response,
+        interrupt_id=None,
+        on_progress=None,
+        *,
+        approval_id=None,
+        on_accepted=None,
+    ):
         """恢复本进程持有的阶段或审批，不重放已完成阶段。"""
         if not self._lock.acquire(blocking=False):
+            if approval_id is not None:
+                raise RunControlError("RUN_BUSY", "会话正在处理请求")
             raise ValueError("会话正在处理请求")
+        state = None
+        worktree = None
         try:
+            with self._control_lock:
+                run = self.records.get(Run, run_id)
+                if run["session_id"] != self.id:
+                    raise ValueError("运行不属于当前会话")
+                state = self._active.get(run_id)
+                self.expire_approvals(run_id)
+                if approval_id is not None:
+                    approval = self.records.db.first(
+                        select(Interaction).where(
+                            Interaction.id == approval_id,
+                            Interaction.run_id == run_id,
+                            Interaction.kind == "approval",
+                        )
+                    )
+                    if approval is None:
+                        raise RunControlError("APPROVAL_NOT_FOUND", "审批不存在或不属于当前运行")
+                    if approval["status"] != "pending":
+                        code = (
+                            "APPROVAL_EXPIRED"
+                            if approval["status"] == "expired"
+                            else "APPROVAL_ALREADY_RESOLVED"
+                        )
+                        raise RunControlError(
+                            code, "审批已过期" if code == "APPROVAL_EXPIRED" else "审批已解决"
+                        )
+                    interrupt_id = approval["interrupt_id"]
+                run = self.records.get(Run, run_id)
+                if run["status"] != "waiting" or run_id not in self._active:
+                    raise ValueError("运行已结束或中断，不能恢复旧审批")
+                state = self._active[run_id]
+                if state.get("restored_workspace") and not interrupt_id:
+                    raise RunControlError("CHECKPOINT_INPUT_REQUIRED", "请使用重启后换发的输入标识")
+                pending = self.records.db.rows(
+                    select(Interaction).where(
+                        Interaction.run_id == run_id, Interaction.status == "pending"
+                    )
+                )
+                if interrupt_id is None and len(pending) != 1:
+                    raise ValueError("必须指定 interruptId")
+                selected = next(
+                    (
+                        item
+                        for item in pending
+                        if interrupt_id is None or item["interrupt_id"] == interrupt_id
+                    ),
+                    None,
+                )
+                if selected is None:
+                    raise ValueError("旧审批已失效、已处理或不存在")
+                worktree = self.runtime.reserve_worktree(self.repository.root)
+                if worktree is None:
+                    raise RunControlError("RUN_BUSY", "工作区正在被其他会话使用")
+                try:
+                    self._verify_waiting_workspace(state)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    self._finish(run_id, state, "interrupted", "恢复条件已变化，请重试")
+                    raise RunControlError("CHECKPOINT_STALE", "恢复条件已变化，请重试") from exc
+                if selected["kind"] == "approval":
+                    approved = (
+                        response.get("approved") if isinstance(response, Mapping) else response
+                    )
+                    if not isinstance(approved, bool):
+                        raise ValueError("approved 必须是布尔值")
+                    response = {"approved": approved}
+                if state.get("manual") == "preview":
+                    if isinstance(response, str):
+                        response = json.loads(response)
+                    config = validate_preview(response, self.sandbox)
+                    state["snapshot"]["preview"] = config
+                    self.records.update(
+                        Project,
+                        self.record["project_id"],
+                        preview_json=dumps(config),
+                        updated_at=now(),
+                    )
+                    self.records.update(Run, run_id, config_snapshot_json=dumps(state["snapshot"]))
+                elif state.get("manual") == "capture_approval":
+                    if not isinstance(response, Mapping) or response.get("approved") is not True:
+                        state["cancelled"] = True
+                    else:
+                        state["capture_approved"] = True
+                elif state.get("manual") in {"review_limit", "review_unavailable"}:
+                    action = response.get("action") if isinstance(response, Mapping) else response
+                    if action not in {"accept", "cancel", "retry"}:
+                        raise ValueError("请选择 accept、cancel 或 retry")
+                    if action == "accept":
+                        state["phase"] = "summary"
+                        state["accepted_with_issues"] = True
+                    elif action == "cancel":
+                        state["cancelled"] = True
+                    elif state["manual"] == "review_limit":
+                        state["iteration"] += 1
+                        state["phase"] = "code"
+                    else:
+                        state["review_attempt"] = state.get("review_attempt", 0) + 1
+                        state["phase"] = "capture"
+                else:
+                    graph_id = state.get("interrupt_ids", {}).get(
+                        selected["interrupt_id"], selected["interrupt_id"]
+                    )
+                    state["resume"] = Command(resume={graph_id: response})
+                with self.records.db.transaction():
+                    resolved = (
+                        [self.runtime.approvals.resolve(selected, response["approved"])]
+                        if selected["kind"] == "approval"
+                        else []
+                    )
+                    if not resolved:
+                        self.records.update(
+                            Interaction,
+                            selected["id"],
+                            response_json=dumps(response),
+                            status="resolved",
+                            updated_at=now(),
+                        )
+                    if selected["kind"] == "clarification":
+                        self.records.message(
+                            self.id, "user", "补充信息：" + dumps(response), run_id=run_id
+                        )
+                    self.records.update(Run, run_id, status="running", updated_at=now())
+                    self.records.delete_checkpoint(run_id)
+                state.pop("manual", None)
+                state["executing"] = True
+            self.runtime.approvals.publish(resolved)
+            self.runtime.approvals.arm(self, run_id)
+            if on_accepted:
+                try:
+                    on_accepted()
+                except (ConnectionError, OSError):
+                    pass
+            return self._execute(run_id, state, on_progress, reserved_worktree=worktree)
+        except RunControlError as exc:
+            if exc.code == "APPROVAL_EXPIRED":
+                self.expire_approvals(run_id)
+            raise
+        finally:
+            if worktree is not None:
+                self.runtime.release_worktree(worktree)
+            self._lock.release()
+            if state:
+                self._notify_timeout(state, run_id)
+
+    def git_rollback(self, run_id):
+        """独占工作树后复核当前状态并回滚本轮改动。"""
+        worktree = self.runtime.reserve_worktree(self.repository.root)
+        if worktree is None:
+            raise RunControlError("RUN_BUSY", "工作区正在被其他会话使用")
+        try:
+            return super().git_rollback(run_id)
+        finally:
+            self.runtime.release_worktree(worktree)
+
+    def _verify_waiting_workspace(self, state):
+        """核对上次暂停时的工作树，重启后同时校验冻结策略。"""
+        if state.get("restored_workspace"):
+            self.runtime.checkpoints.verify_resume(self, state)
+        elif (
+            state.get("waiting_workspace")
+            and self.repository.capture() != state["waiting_workspace"]
+        ):
+            raise ValueError("等待期间工作区已变化")
+
+    def _execute(
+        self, run_id, state, progress, started=False, on_created=None, *, reserved_worktree=None
+    ):
+        """隔离工作区写入并在异常时提交失败状态。"""
+        worktree = reserved_worktree or self.runtime.reserve_worktree(self.repository.root)
+        failure = None
+        failure_code = None
+        result = None
+        try:
+            with cancellation_scope(state["cancel_event"]):
+                if state.get("cancelled"):
+                    state["cancel_event"].set()
+                check_cancelled()
+                if on_created:
+                    try:
+                        on_created(run_id)
+                    except (ConnectionError, OSError):
+                        pass
+                    check_cancelled()
+                if worktree is None:
+                    raise ValueError("工作区正在被其他会话使用")
+                if started:
+                    self.repository.begin_run(run_id)
+                self._emit(
+                    run_id,
+                    state,
+                    "run.started" if started else "run.resumed",
+                    {
+                        "goal": state["goal"],
+                        "retry_of_run_id": state["snapshot"].get("retry", {}).get("source_run_id"),
+                        "retry_task_id": state["snapshot"].get("retry", {}).get("task_id"),
+                    },
+                    progress,
+                )
+                if started and state["snapshot"].get("retry"):
+                    from .retry_plan import prepare_retry
+
+                    prepare_retry(self, run_id, state)
+                if state.get("restored_workspace") or state.get("waiting_workspace"):
+                    try:
+                        self._verify_waiting_workspace(state)
+                    except (OSError, ValueError, RuntimeError):
+                        state["error_code"] = "CHECKPOINT_STALE"
+                        return self._finish(run_id, state, "interrupted", "恢复条件已变化，请重试")
+                    state.pop("restored_workspace", None)
+                    state.pop("waiting_workspace", None)
+                result = self._drive(run_id, state, progress)
+                check_cancelled()
+        except OperationCancelled:
+            result = self._finish(run_id, state, "cancelled", "用户取消了运行")
+        except Exception as exc:
+            failure = self.runtime.redact(str(exc))
+            failure_code = getattr(exc, "code", None)
+            if failure_code:
+                state["error_code"] = failure_code
+            result = self._finish(run_id, state, "failed", failure)
+        finally:
+            if reserved_worktree is None and worktree is not None:
+                self.runtime.release_worktree(worktree)
+            with self._control_lock:
+                state["executing"] = False
+        with self._control_lock:
+            if state["cancel_event"].is_set():
+                return self._finish(run_id, state, "cancelled", "用户取消了运行")
+            if failure:
+                if failure_code:
+                    raise RunExecutionError(failure_code, failure) from None
+                raise RuntimeError(failure) from None
+            if result and result.status == "waiting":
+                self.expire_approvals(run_id)
+                self.runtime.approvals.arm(self, run_id)
+                result = self._result(run_id)
+            return result
+
+    def expire_approvals(self, run_id):
+        """到期拒绝整轮未解决操作，活动执行先收束到安全点。"""
+        with self._control_lock:
+            state = self._active.get(run_id)
+            if state is None or state["cancel_event"].is_set():
+                return False
+            due = self.records.db.first(
+                select(Interaction.id).where(
+                    Interaction.run_id == run_id,
+                    Interaction.kind == "approval",
+                    Interaction.status == "pending",
+                    Interaction.expires_at <= self.runtime.approvals.clock().isoformat(),
+                )
+            )
+            if not due:
+                return False
+            state["stop_status"] = "failed"
+            state["stop_report"] = "审批超时，操作已拒绝；请重新发起任务"
+            state["approval_timeout_notification"] = True
+            state["cancel_event"].set()
+            if not state["executing"]:
+                self._finish(run_id, state, "failed", state["stop_report"])
+        self._notify_timeout(state, run_id)
+        return True
+
+    def cancel(self, run_id):
+        """请求协作取消，等待中的运行立即收束，活动执行在安全点结束。"""
+        with self._control_lock:
             run = self.records.get(Run, run_id)
             if run["session_id"] != self.id:
                 raise ValueError("运行不属于当前会话")
-            if run["status"] != "waiting" or run_id not in self._active:
-                raise ValueError("运行已结束或中断，不能恢复旧审批")
-            state = self._active[run_id]
-            pending = self.records.db.rows(
-                select(Interaction).where(
-                    Interaction.run_id == run_id, Interaction.status == "pending"
-                )
-            )
-            if interrupt_id is None and len(pending) != 1:
-                raise ValueError("必须指定 interruptId")
-            selected = next(
-                (
-                    item
-                    for item in pending
-                    if interrupt_id is None or item["interrupt_id"] == interrupt_id
-                ),
-                None,
-            )
-            if selected is None:
-                raise ValueError("审批已处理或不存在")
-            if state.get("manual") == "preview":
-                if isinstance(response, str):
-                    response = json.loads(response)
-                config = validate_preview(response, self.sandbox)
-                state["snapshot"]["preview"] = config
-                self.records.update(
-                    Project,
-                    self.record["project_id"],
-                    preview_json=dumps(config),
-                    updated_at=now(),
-                )
-                self.records.update(Run, run_id, config_snapshot_json=dumps(state["snapshot"]))
-            elif state.get("manual") == "capture_approval":
-                if not isinstance(response, Mapping) or response.get("approved") is not True:
-                    state["cancelled"] = True
-                else:
-                    state["capture_approved"] = True
-            elif state.get("manual") in {"review_limit", "review_unavailable"}:
-                action = response.get("action") if isinstance(response, Mapping) else response
-                if action not in {"accept", "cancel", "retry"}:
-                    raise ValueError("请选择 accept、cancel 或 retry")
-                if action == "accept":
-                    state["phase"] = "summary"
-                    state["accepted_with_issues"] = True
-                elif action == "cancel":
-                    state["cancelled"] = True
-                elif state["manual"] == "review_limit":
-                    state["iteration"] += 1
-                    state["phase"] = "code"
-                else:
-                    state["review_attempt"] = state.get("review_attempt", 0) + 1
-                    state["phase"] = "capture"
-            else:
-                graph_id = state.get("interrupt_ids", {}).get(
-                    selected["interrupt_id"], selected["interrupt_id"]
-                )
-                state["resume"] = Command(resume={graph_id: response})
-            with self.records.db.transaction():
-                self.records.update(
-                    Interaction,
-                    selected["id"],
-                    response_json=dumps(response),
-                    status="resolved",
-                    updated_at=now(),
-                )
-                if selected["kind"] == "clarification":
-                    self.records.message(
-                        self.id, "user", "补充信息：" + dumps(response), run_id=run_id
-                    )
-                self.records.update(Run, run_id, status="running", updated_at=now())
-            state.pop("manual", None)
-            return self._execute(run_id, state, on_progress)
-        finally:
-            self._lock.release()
-
-    def _execute(self, run_id, state, progress, started=False):
-        """隔离工作区写入并在异常时提交失败状态。"""
-        workspace_lock = self.runtime.workspace_lock(self.workspace.path)
-        if not workspace_lock.acquire(blocking=False):
-            self._finish(run_id, state, "failed", "工作区正在被其他会话使用")
-            raise ValueError("工作区正在被其他会话使用")
-        try:
-            if started:
-                self.repository.begin_run(run_id)
-            self._emit(
-                run_id,
-                state,
-                "run.started" if started else "run.resumed",
-                {"goal": state["goal"]},
-                progress,
-            )
-            if state.get("cancelled"):
-                return self._finish(run_id, state, "cancelled", "用户取消了协作流程")
-            return self._drive(run_id, state, progress)
-        except Exception as exc:
-            message = self.runtime.redact(str(exc))
-            self._finish(run_id, state, "failed", message)
-            raise RuntimeError(message) from None
-        finally:
-            workspace_lock.release()
+            if run["status"] not in {"queued", "running", "waiting"}:
+                return run["status"] == "cancelled", None
+            state = self._active.get(run_id)
+            if state is None:
+                raise ValueError("当前进程未持有该运行，不能继续操作")
+            state["cancel_event"].set()
+            if state["executing"]:
+                return True, None
+            return True, self._finish(run_id, state, "cancelled", "用户取消了运行")
 
     def _emit(self, run_id, state, name, value, progress):
         """先持久化事件再通知协议层。"""
+        check_cancelled()
         payload = json.loads(self.runtime.redact(dumps(dict(value))))
         if state.get("agent_run_id"):
             payload |= {
@@ -296,9 +571,7 @@ class WorkflowSession(AgentSession):
                 "iteration": state["iteration"],
             }
         self.records.event(run_id, name, payload)
-        if progress and (
-            not name.startswith("stage.") or state["snapshot"]["workflow"]["kind"] != "single"
-        ):
+        if progress:
             try:
                 progress(run_id, name, payload)
             except (ConnectionError, OSError):
@@ -307,13 +580,17 @@ class WorkflowSession(AgentSession):
     def _drive(self, run_id, state, progress):
         """驱动预设流程直到完成或等待用户。"""
         while True:
+            check_cancelled()
             phase = state["phase"]
             if phase == "code":
                 if not self._code(run_id, state, progress):
                     return self._result(run_id)
                 if state["mode"] != "run" or state["snapshot"]["workflow"]["kind"] == "single":
                     result = self._finish(run_id, state, "completed", state["report"])
-                    self._emit(run_id, state, "summarize", {"report": state["report"]}, progress)
+                    if result.status == "completed":
+                        self._emit(
+                            run_id, state, "summarize", {"report": state["report"]}, progress
+                        )
                     return result
                 state["phase"] = "capture"
             elif phase == "capture":
@@ -348,6 +625,7 @@ class WorkflowSession(AgentSession):
                     if self.repository.capture().tree != state["code_tree"]:
                         raise ValueError("工作区已发生变化，请重新运行编写阶段后审查")
                     shots, log = self.runtime.capture.capture(preview, self.sandbox)
+                    check_cancelled()
                     if self.repository.capture().tree != state["code_tree"]:
                         raise ValueError("截图期间工作区发生变化，证据已失效")
                     if not shots:
@@ -398,11 +676,15 @@ class WorkflowSession(AgentSession):
                         )
                     state["artifacts"] = artifacts
                     state["phase"] = "review"
+                except OperationCancelled:
+                    raise
                 except Exception as exc:
                     return self._unable(run_id, state, self.runtime.redact(str(exc)), progress)
             elif phase == "review":
                 try:
                     review = self._review(run_id, state, progress)
+                except OperationCancelled:
+                    raise
                 except Exception as exc:
                     return self._unable(run_id, state, self.runtime.redact(str(exc)), progress)
                 state["handoff"] = dumps(review)
@@ -432,13 +714,14 @@ class WorkflowSession(AgentSession):
                     state["phase"] = "code"
             elif phase == "summary":
                 config = self._step(state, "summary")["config"]
-                inputs = self._input(
+                config, inputs, _ = self._specialize(
                     state,
                     config,
                     "根据编写结果和最新审查记录汇总实际完成情况。\n"
                     + state["report"]
                     + "\n"
                     + state["handoff"],
+                    include_tools=False,
                 )
                 agent_run = self._begin_agent(run_id, state, config, inputs, progress)
                 response = self._model(config).invoke(self._messages(config, inputs))
@@ -454,7 +737,8 @@ class WorkflowSession(AgentSession):
                     getattr(response, "usage_metadata", None),
                 )
                 result = self._finish(run_id, state, "completed", report)
-                self._emit(run_id, state, "summarize", {"report": report}, progress)
+                if result.status == "completed":
+                    self._emit(run_id, state, "summarize", {"report": report}, progress)
                 return result
 
     def _step(self, state, key):
@@ -487,8 +771,38 @@ class WorkflowSession(AgentSession):
             ),
         ]
 
+    def _specialize(self, state, config, current, *, task_path=(), include_tools=True):
+        """解析本轮冻结策略，并保存可解释的能力清单和实际输入。"""
+        check_cancelled()
+        budget = config["model"]["context_budget_tokens"]
+        resolved = state["capabilities"].resolve(
+            CapabilityContext(
+                project_path=self.workspace.path,
+                goal=current,
+                agent_id=config["agent"]["id"],
+                task_path=task_path,
+            ),
+            tools=self._tools({"allowed_tools": ["*"]}) if include_tools else {},
+            instructions=config["agent"]["instructions"],
+            allowed_tools=config["agent"]["allowed_tools"] if include_tools else (),
+            max_bytes=min(16_000, max(0, budget - len(current.encode("utf-8")) - 2)),
+        )
+        check_cancelled()
+        effective = config | {"agent": config["agent"] | {"instructions": resolved.instructions}}
+        inputs = self._input(
+            state | {"history": []} if task_path else state,
+            effective,
+            current + ("\n\n" + resolved.context if resolved.context else ""),
+        )
+        inputs["capabilities"] = {
+            "applied": list(resolved.applied),
+            "failed": list(resolved.failed),
+        }
+        return effective, inputs, dict(resolved.tools)
+
     def _begin_agent(self, run_id, state, config, inputs, progress):
         """登记唯一阶段执行及其输入。"""
+        check_cancelled()
         key = state["phase"]
         if key == "review" and state.get("review_attempt"):
             key += f"_retry_{state['review_attempt']}"
@@ -511,13 +825,14 @@ class WorkflowSession(AgentSession):
 
     def _complete_agent(self, run_id, state, agent_run, output, progress, usage=None):
         """保存阶段结果和内部交接消息后发送完成事件。"""
+        check_cancelled()
         with self.records.db.transaction():
             self.records.update(
                 AgentRun,
                 agent_run,
                 status="completed",
                 output=output,
-                usage_json=dumps(usage or {}),
+                usage_json=dumps(read_usage(self.records, agent_run, usage)),
                 updated_at=now(),
             )
             self.records.message(
@@ -532,17 +847,53 @@ class WorkflowSession(AgentSession):
 
     def _code(self, run_id, state, progress):
         """运行编写角色的工具图并持久化暂停点。"""
+        from .graph_checkpoint import checkpoint_saver
+
         config = self._step(state, "code")["config"]
         if "graph" not in state:
+            saved = state.pop("graph_restart", None)
+            retry = state.get("retry_root") if state["iteration"] == 0 else None
             current = state["goal"] + (
                 "\n请根据审查返修：\n" + state["handoff"] if state["handoff"] else ""
             )
-            inputs = self._input(state, config, current)
-            agent_run = self._begin_agent(run_id, state, config, inputs, progress)
+            if retry:
+                from .retry_plan import retry_context
+
+                budget = (
+                    config["model"]["context_budget_tokens"] - len(current.encode("utf-8")) - 256
+                )
+                current += "\n重试来源（仅供参考）：\n" + retry_context(retry, budget // 2)
+            config, inputs, tools = self._specialize(
+                state,
+                config,
+                current,
+                include_tools=state["mode"] != "say",
+                task_path=tuple(retry["path"]) if retry else (),
+            )
+            policy = get_effort_policy(retry["effort"]) if retry and retry.get("effort") else None
+            maximum = state["task_budget"].limits.max_plan_tasks
+            if policy:
+                config = apply_effort(config, policy.effort)
+                inputs["effort_policy"] = config["effort_policy"]
+                maximum = min(maximum, policy.max_steps)
+            if retry:
+                state["role_path"] = tuple(retry["path"])
+                inputs["retry"] = {
+                    "source_agent_run_id": retry["source_agent_run_id"],
+                    "retained_task_ids": [item["id"] for item in retry["retained"]],
+                    "role_path": retry["path"],
+                    "role_goal": retry["goal"],
+                    "retained": retry["retained"],
+                    "serial": retry["serial"],
+                    "effort": retry.get("effort"),
+                }
+                inputs["artifact_ids"] = retry["artifact_ids"]
+            agent_run = (
+                saved["id"] if saved else self._begin_agent(run_id, state, config, inputs, progress)
+            )
             state["code_agent_run_id"] = agent_run
             llm = self._model(config)
-            tools = self._tools(config["agent"])
-            from aurora.agent.capability.registry import registry_tools
+            from aurora.agent.capability.agent_registry import registry_tools
 
             configs = [
                 c for c in state["snapshot"]["agents"] if c["agent"]["id"] != config["agent"]["id"]
@@ -555,17 +906,36 @@ class WorkflowSession(AgentSession):
                     if "*" in allowed or key in allowed
                 }
             )
-            planner = self.runtime._planner_factory(llm, tools)
+            planner: Any
+            if retry:
+                from .retry_plan import RetryPlanner, response_tool
+
+                if any(task["tool"] == "agent_respond" for task in retry["tasks"]):
+                    tools["agent_respond"] = response_tool(
+                        self, llm, config, inputs, retry["artifact_ids"], run_id, agent_run
+                    )
+                planner = RetryPlanner(retry)
+            else:
+                planner = MeasuredPlanner(
+                    self.records, agent_run, self.runtime._planner_factory(llm, tools)
+                )
             state["planner"] = planner
+            if hasattr(planner, "set_max_tasks"):
+                planner.set_max_tasks(maximum)
             if hasattr(planner, "set_instructions"):
-                from aurora.agent.capability.registry import catalog
+                from aurora.agent.capability.agent_registry import catalog
 
                 instructions = config["agent"]["instructions"]
                 if "call_agent" in tools:
                     instructions += "\n本轮可调用的 Agent：\n" + dumps(catalog(configs))
+                if policy:
+                    instructions += "\n\n执行强度策略：\n" + policy.instructions
                 planner.set_instructions(instructions)
             goal = (
-                "历史会话（仅供参考）：\n" + dumps(inputs["history"]) + "\n本轮目标：\n" + current
+                "历史会话（仅供参考）：\n"
+                + dumps(inputs["history"])
+                + "\n本轮目标：\n"
+                + inputs["current"]
             )
             if state["mode"] == "say":
                 response = llm.invoke(self._messages(config, inputs))
@@ -580,10 +950,16 @@ class WorkflowSession(AgentSession):
                 )
                 return True
             if state["mode"] == "plan":
-                state["tasks"] = planner.plan(goal)
+                state["tasks"] = validate_plan(
+                    planner.plan(goal),
+                    tools,
+                    max_tasks=maximum,
+                )
+                state["task_budget"].reserve(agent_run, state["tasks"])
                 state["report"] = dumps(state["tasks"])
                 self._complete_agent(run_id, state, agent_run, state["report"], progress)
                 return True
+            safe_delegates = read_only_delegates(self, state)
             state["graph"] = build_delegation_graph(
                 planner,
                 tools,
@@ -592,69 +968,48 @@ class WorkflowSession(AgentSession):
                     if state["snapshot"]["approval_mode"] == "interactive"
                     else state["snapshot"]["approval_mode"]
                 ),
-                clarifier=self.runtime._clarifier_factory(llm),
-                checkpointer=InMemorySaver(),
+                clarifier=NoClarifier() if retry else self.runtime._clarifier_factory(llm),
+                max_clarification_rounds=policy.max_steps - 1 if policy else 3,
+                checkpointer=checkpoint_saver(saved),
+                task_observer=lambda task: start_task(self, run_id, state["task_ids"], task),
+                is_parallel_safe=lambda task: task["args"].get("agent_id") in safe_delegates,
                 collect_feedback=self.feedback_sink is not None,
                 feedback_sink=self.feedback_sink,
-                serial="call_agent" in tools,
+                serial=retry["serial"] if retry else "call_agent" in tools,
                 delegate=lambda task: self._delegate(run_id, state, task, configs, progress),
+                cancellation=state["cancel_event"],
+                tool_runner=lambda task, tool: self.runtime.traces.invoke(
+                    run_id, agent_run, task["id"], tool, task["args"]
+                ),
+                max_plan_tasks=maximum,
+                allow_empty_plan=bool(retry),
+                plan_guard=lambda tasks: state["task_budget"].reserve(agent_run, tasks),
             )
             state["graph_input"] = {"goal": goal}
-            state["task_ids"] = {}
+            state["task_ids"] = dict(saved["tasks"]) if saved else {}
         graph = state["graph"]
         agent_run = state["code_agent_run_id"]
         state["agent_run_id"] = agent_run
         self.records.update(AgentRun, agent_run, status="running", updated_at=now())
-        graph_config = {"configurable": {"thread_id": agent_run}}
+        graph_config = {
+            "configurable": {"thread_id": agent_run},
+            "recursion_limit": max(100, 2 * state["task_budget"].limits.max_plan_tasks + 64),
+        }
         value = state.pop("resume", state["graph_input"])
         for chunk in graph.stream(value, graph_config, stream_mode="updates"):
             for node, update in chunk.items():
                 if not isinstance(update, Mapping):
                     continue
                 if node == "plan":
-                    with self.records.db.transaction():
-                        self.records.db.execute(delete(Task).where(Task.agent_run_id == agent_run))
-                        mapped = []
-                        for task in update["tasks"]:
-                            task_id = uid()
-                            state["task_ids"][task["id"]] = task_id
-                            self.records.insert(
-                                Task,
-                                id=task_id,
-                                agent_run_id=agent_run,
-                                task_key=task["id"],
-                                description=task["description"],
-                                tool=task["tool"],
-                                args_json=dumps(task["args"]),
-                                effort=str(task["effort"]),
-                                status="queued",
-                                created_at=now(),
-                                updated_at=now(),
-                            )
-                            mapped.append(dict(task, id=task_id))
+                    ids, mapped = record_plan(self, agent_run, update["tasks"])
+                    state["task_ids"] = ids
                     update = dict(update, tasks=mapped)
                     state["tasks"] = mapped
-                if node == "dispatch":
-                    with self.records.db.transaction() as connection:
-                        connection.execute(
-                            orm_update(Task)
-                            .where(Task.agent_run_id == agent_run, Task.status == "queued")
-                            .values(status="running", updated_at=now())
-                        )
-                if node == "execute":
-                    results = []
-                    for result in update.get("results", []):
-                        task_id = state["task_ids"][result["task_id"]]
-                        output = self.runtime.redact(result["output"])
-                        self.records.update(
-                            Task,
-                            task_id,
-                            status="completed" if result["ok"] else "failed",
-                            output=output,
-                            error="" if result["ok"] else output,
-                            updated_at=now(),
-                        )
-                        results.append(dict(result, task_id=task_id, output=output))
+                if node in {"dispatch", "execute"} and update.get("results"):
+                    results = [
+                        record_result(self, run_id, state["task_ids"], item)
+                        for item in update["results"]
+                    ]
                     state["results"].extend(results)
                     update = dict(update, results=results)
                 if node != "summarize":
@@ -662,12 +1017,8 @@ class WorkflowSession(AgentSession):
         snapshot = graph.get_state(graph_config)
         interruptions = [item for task in snapshot.tasks for item in task.interrupts]
         if interruptions:
+            wait_for_input(self, run_id, agent_run)
             with self.records.db.transaction():
-                self.records.db.execute(
-                    orm_update(Task)
-                    .where(Task.agent_run_id == agent_run, Task.status.in_(("queued", "running")))
-                    .values(status="waiting", updated_at=now())
-                )
                 for item in interruptions:
                     public_id = item.value.get("delegationInterruptId", item.id)
                     state.setdefault("interrupt_ids", {})[public_id] = item.id
@@ -676,16 +1027,12 @@ class WorkflowSession(AgentSession):
                             Interaction.run_id == run_id, Interaction.interrupt_id == public_id
                         )
                     ):
-                        self.records.insert(
-                            Interaction,
-                            id=uid(),
-                            run_id=run_id,
+                        self.runtime.approvals.create(
+                            run_id,
+                            item.value.get("kind", "approval"),
+                            item.value,
                             agent_run_id=item.value.get("agentRunId", agent_run),
                             interrupt_id=public_id,
-                            kind=item.value.get("kind", "approval"),
-                            request_json=dumps(item.value),
-                            created_at=now(),
-                            updated_at=now(),
                         )
                 self.records.update(AgentRun, agent_run, status="waiting", updated_at=now())
                 self.records.update(
@@ -695,6 +1042,8 @@ class WorkflowSession(AgentSession):
                     updated_at=now(),
                     state_json=dumps(self._public_state(state)),
                 )
+                state["waiting_workspace"] = self.repository.finish_run(run_id, "running")
+                self.runtime.checkpoints.save(self, run_id, state)
             return False
         if any(not result["ok"] for result in snapshot.values.get("results", [])):
             raise ValueError("编写阶段存在失败的工具任务，请检查执行记录")
@@ -723,7 +1072,7 @@ class WorkflowSession(AgentSession):
         config = self._step(state, "review")["config"]
         if "image" not in config["model"]["input_types"]:
             raise ValueError("审查模型未声明支持图片输入")
-        inputs = self._input(
+        config, inputs, _ = self._specialize(
             state,
             config,
             state["goal"]
@@ -731,6 +1080,7 @@ class WorkflowSession(AgentSession):
             + state["report"]
             + "\n上一轮审查：\n"
             + state["handoff"],
+            include_tools=False,
         )
         agent_run = self._begin_agent(run_id, state, config, inputs, progress)
         state["review_agent_run_id"] = agent_run
@@ -776,6 +1126,7 @@ class WorkflowSession(AgentSession):
                 HumanMessage(content=content),
             ]
         )
+        check_cancelled()
         usage = {}
         if isinstance(response, dict) and "parsed" in response:
             if response.get("parsing_error") or response["parsed"] is None:
@@ -913,18 +1264,10 @@ class WorkflowSession(AgentSession):
 
     def _wait(self, run_id, state, manual, kind, request):
         """登记流程级人工输入点。"""
+        check_cancelled()
         state["manual"] = manual
         with self.records.db.transaction():
-            self.records.insert(
-                Interaction,
-                id=uid(),
-                run_id=run_id,
-                interrupt_id=uid(),
-                kind=kind,
-                request_json=dumps({"kind": kind} | request),
-                created_at=now(),
-                updated_at=now(),
-            )
+            self.runtime.approvals.create(run_id, kind, {"kind": kind} | request)
             self.records.update(
                 Run,
                 run_id,
@@ -932,10 +1275,24 @@ class WorkflowSession(AgentSession):
                 updated_at=now(),
                 state_json=dumps(self._public_state(state)),
             )
+            state["waiting_workspace"] = self.repository.finish_run(run_id, "running")
+            self.runtime.checkpoints.save(self, run_id, state)
         return self._result(run_id)
 
     def _public_state(self, state):
         """生成协议与重载共用的公开快照。"""
+        if state.get("code_agent_run_id") and state["tasks"]:
+            statuses = {
+                row["id"]: row["status"]
+                for row in self.records.db.rows(
+                    select(Task.id, Task.status).where(
+                        Task.agent_run_id == state["code_agent_run_id"]
+                    )
+                )
+            }
+            for task in state["tasks"]:
+                if task["id"] in statuses:
+                    task["status"] = statuses[task["id"]]
         return {
             "goal": state["goal"],
             "report": state.get("report", ""),
@@ -943,37 +1300,51 @@ class WorkflowSession(AgentSession):
             "results": state["results"],
             "phase": state["phase"],
             "iteration": state["iteration"],
+            **({"error_code": state["error_code"]} if state.get("error_code") else {}),
         }
 
     def _finish(self, run_id, state, status, report):
         """原子结束运行并提交最终公开消息。"""
+        with self._control_lock:
+            run = self.records.get(Run, run_id)
+            if run["status"] not in {"queued", "running", "waiting"}:
+                return self._result(run_id)
+            if state["cancel_event"].is_set():
+                status = state.get("stop_status", "cancelled")
+                report = state.get("stop_report", "用户取消了运行")
+            if status == "cancelled":
+                tasks = self.records.db.rows(
+                    select(Task.id, Task.status).where(
+                        Task.agent_run_id.in_(select(AgentRun.id).where(AgentRun.run_id == run_id))
+                    )
+                )
+                statuses = {row["id"]: row["status"] for row in tasks}
+                state["tasks"] = [
+                    task | {"status": statuses.get(task["id"], "cancelled")}
+                    for task in state["tasks"]
+                ]
+                for task in state["tasks"]:
+                    if task["status"] in {"queued", "running", "waiting"}:
+                        task["status"] = "cancelled"
+            result = self._finish_locked(run_id, state, status, report)
+        return result
+
+    def _notify_timeout(self, state, run_id):
+        """释放执行锁后才通知超时终态，接收器可立即开始下一轮。"""
+        if not state.get("approval_timeout_notification"):
+            return
+        with self._control_lock:
+            if state["executing"] or self._lock.locked():
+                return
+            state.pop("approval_timeout_notification", None)
+            result = self._result(run_id)
+        self.runtime.events.publish("run.failed", result.to_dict())
+
+    def _finish_locked(self, run_id, state, status, report):
+        """在执行控制锁内保存唯一终态并失效未解决输入。"""
         state["report"] = report
         with self.records.db.transaction() as connection:
-            self.records.update(
-                Run,
-                run_id,
-                status=status,
-                ended_at=now(),
-                updated_at=now(),
-                error=report if status == "failed" else "",
-                state_json=dumps(self._public_state(state)),
-            )
-            self.records.update(ConversationSession, self.id, updated_at=now())
-            self.records.event(run_id, "run." + status, self._public_state(state))
-            self.records.message(
-                self.id,
-                "assistant",
-                report,
-                run_id=run_id,
-                agent_run_id=state.get("agent_run_id"),
-                kind="report" if status == "completed" else "error",
-                status="completed" if status == "completed" else "failed",
-            )
-            connection.execute(
-                orm_update(Interaction)
-                .where(Interaction.run_id == run_id, Interaction.status == "pending")
-                .values(status="expired", updated_at=now())
-            )
+            self.records.delete_checkpoint(run_id)
             connection.execute(
                 orm_update(Task)
                 .where(
@@ -982,14 +1353,58 @@ class WorkflowSession(AgentSession):
                 )
                 .values(status=status, updated_at=now())
             )
+            public_state = self._public_state(state)
+            self.records.update(
+                Run,
+                run_id,
+                status=status,
+                ended_at=now(),
+                updated_at=now(),
+                error=report if status == "failed" else "",
+                state_json=dumps(public_state),
+            )
+            self.records.update(ConversationSession, self.id, updated_at=now())
+            resolutions = self.runtime.approvals.reject_pending(
+                run_id, "timeout" if state.get("stop_status") else status
+            )
+            self.records.event(run_id, "run." + status, public_state)
+            self.records.message(
+                self.id,
+                "assistant",
+                report,
+                run_id=run_id,
+                agent_run_id=state.get("agent_run_id"),
+                kind="message"
+                if status == "cancelled"
+                else "report"
+                if status == "completed"
+                else "error",
+                status="cancelled"
+                if status == "cancelled"
+                else "completed"
+                if status == "completed"
+                else "failed",
+            )
+            connection.execute(
+                orm_update(Interaction)
+                .where(Interaction.run_id == run_id, Interaction.status == "pending")
+                .values(status="expired", updated_at=now())
+            )
             connection.execute(
                 orm_update(AgentRun)
                 .where(AgentRun.run_id == run_id, AgentRun.status.in_(("running", "waiting")))
                 .values(status=status, error=report if status == "failed" else "", updated_at=now())
             )
+        self.runtime.checkpoints.discard_files(run_id)
+        self.runtime.approvals.disarm(run_id)
+        self.runtime.approvals.publish(resolutions)
         if run_id in self._run_ids:
             try:
-                self.repository.finish_run(run_id, status)
+                self.repository.finish_run(
+                    run_id,
+                    status,
+                    snapshot=state.get("waiting_workspace") or state.get("restored_workspace"),
+                )
             except ValueError:
                 pass
         self._active.pop(run_id, None)
@@ -1011,15 +1426,22 @@ class WorkflowSession(AgentSession):
             run_id,
             run["status"],
             run["state"] | {"goal": run["goal"]},
-            tuple(RuntimeInterrupt(row["interrupt_id"], row["request"]) for row in pending),
+            tuple(
+                RuntimeInterrupt(row["interrupt_id"], self.runtime.approvals.request(row))
+                for row in pending
+            ),
+            retry_of_run_id=run["retry_of_run_id"],
+            retry_task_id=run["retry_task_id"],
         )
 
-    def close(self):
-        """中断活动运行并释放临时 Git 资源。"""
+    def close(self, *, preserve_waiting=False):
+        """关闭会话，运行时退出时保留已持久化的等待点。"""
         if not self._lock.acquire(blocking=False):
             raise ValueError("会话正在执行，请等待当前阶段结束后关闭")
         try:
             for run_id, state in list(self._active.items()):
+                if preserve_waiting and self.records.load_checkpoint(run_id) is not None:
+                    continue
                 self._finish(run_id, state, "interrupted", "会话已关闭")
             self.repository.close()
         finally:

@@ -12,7 +12,8 @@ from uuid import uuid4
 
 from langgraph.types import Command
 
-from aurora.agent.core import LLMClarifier, LLMPlanner
+from aurora.agent.capability import CapabilityRegistry
+from aurora.agent.core import ExecutionLimits, LLMClarifier, LLMPlanner
 from aurora.agent.core.state import DelegationState
 from aurora.agent.mcp import (
     McpPackage,
@@ -24,12 +25,28 @@ from aurora.agent.mcp import (
 from aurora.agent.model_access import build_llm
 from aurora.agent.sandbox import Sandbox, SandboxMode, create_sandbox
 from aurora.agent.store import GitRepository, GitView
-from aurora.agent.store.model import ConversationSession, Project
+from aurora.agent.store.model import ConversationSession, Project, Run
 from aurora.agent.tools import Tool
 from aurora.common.text import sanitize_text, sanitize_value
 
 if TYPE_CHECKING:
-    from aurora.agent.orchestration.workflows import WorkflowSession
+    from aurora.agent.orchestration.workflow_session import WorkflowSession
+
+
+class RunControlError(ValueError):
+    """携带稳定错误码的运行控制失败。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class RunExecutionError(RuntimeError):
+    """在已保存失败终态后向请求方返回确定的执行错误码。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -76,6 +93,8 @@ class RunUpdate:
     status: str
     state: Mapping[str, Any]
     interruptions: tuple[RuntimeInterrupt, ...]
+    retry_of_run_id: str | None = None
+    retry_task_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换为协议响应结构。"""
@@ -85,6 +104,8 @@ class RunUpdate:
             "status": self.status,
             "state": dict(self.state),
             "interruptions": [item.to_dict() for item in self.interruptions],
+            "retry_of_run_id": self.retry_of_run_id,
+            "retry_task_id": self.retry_task_id,
         }
 
 
@@ -267,23 +288,32 @@ class AgentRuntime:
         database=None,
         configured_llm_factory=None,
         capture=None,
+        capabilities: CapabilityRegistry | None = None,
+        approval_timeout: float = 300,
+        approval_clock=None,
+        execution_limits: ExecutionLimits | None = None,
     ) -> None:
+        from aurora.agent.orchestration.approval_manager import ApprovalManager
+        from aurora.agent.orchestration.runtime_events import RuntimeEvents
+        from aurora.agent.orchestration.tool_tracing import ToolTracing
+        from aurora.agent.orchestration.workflow_checkpoints import WorkflowCheckpoints
         from aurora.agent.preview.browser import BrowserCapture
         from aurora.agent.store.database import Database
         from aurora.agent.store.records import Records
 
+        self.events = RuntimeEvents()
+        self.execution_limits = (
+            execution_limits if execution_limits is not None else ExecutionLimits()
+        )
+        if not isinstance(self.execution_limits, ExecutionLimits):
+            raise ValueError("执行上限必须是 ExecutionLimits")
+        self.traces = ToolTracing(self)
+        self.approvals = ApprovalManager(self, approval_timeout, approval_clock)
         self._custom_llm = llm_factory is not build_llm
         self._configured_llm_factory = configured_llm_factory
         self.records = Records(database or Database(":memory:" if self._custom_llm else None))
-        try:
-            self.records.acquire_runtime()
-            self.records.bootstrap()
-            self.records.recover()
-        except BaseException:
-            self.records.close()
-            raise
         self.capture = capture or BrowserCapture()
-        self._workspace_locks = {}
+        self._active_worktrees: set[Path] = set()
         self._workspace_lock_guard = threading.Lock()
         self._llm_factory = llm_factory
         self._sandbox_factory = sandbox_factory
@@ -295,6 +325,18 @@ class AgentRuntime:
         self._mcp_clients: dict[str, StdioMcpClient] = {}
         self._mcp_tools: dict[str, dict[str, Tool]] = {}
         self._mcp_package_ids: dict[str, str] = {}
+        self.capabilities = capabilities if capabilities is not None else CapabilityRegistry()
+        self.checkpoints = WorkflowCheckpoints(self)
+        try:
+            self.records.acquire_runtime()
+            self.records.bootstrap()
+            self.checkpoints.recover()
+        except BaseException:
+            self.approvals.close()
+            for session in self._sessions.values():
+                session.repository.close()
+            self.records.close()
+            raise
 
     def create_session(
         self,
@@ -337,7 +379,7 @@ class AgentRuntime:
         """按需重建持久会话的本地资源。"""
         with self._session_lock:
             if session_id not in self._sessions:
-                from aurora.agent.orchestration.workflows import WorkflowSession
+                from aurora.agent.orchestration.workflow_session import WorkflowSession
 
                 record = self.records.get(ConversationSession, session_id)
                 project = self.records.get(Project, record["project_id"])
@@ -355,10 +397,48 @@ class AgentRuntime:
                 session.close()
                 self._sessions.pop(session_id, None)
 
-    def workspace_lock(self, path):
-        """同一工作区的阶段执行使用共享锁。"""
+    def require_run(self, session_id: str, run_id: str):
+        """用稳定错误码校验会话与运行归属。"""
+        from sqlalchemy import select
+
+        if not self.records.db.first(
+            select(ConversationSession.id).where(ConversationSession.id == session_id)
+        ):
+            raise RunControlError("SESSION_NOT_FOUND", "会话不存在")
+        run = self.records.db.first(
+            select(Run).where(Run.id == run_id, Run.session_id == session_id)
+        )
+        if run is None:
+            raise RunControlError("RUN_NOT_FOUND", "运行不存在或不属于当前会话")
+        return run
+
+    def cancel_run(self, session_id: str, run_id: str):
+        """校验运行归属并请求取消，终态查询不重建离线工作区。"""
+        run = self.require_run(session_id, run_id)
+        if run["status"] not in {"queued", "running", "waiting"}:
+            return run["status"] == "cancelled", None
+        with self._session_lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            raise RunControlError("RUNTIME_UNAVAILABLE", "当前进程未持有该运行，不能继续操作")
+        return session.cancel(run_id)
+
+    def reserve_worktree(self, root: Path) -> Path | None:
+        """原子占用 Git 工作树，拒绝与活动工作树重叠的目录。"""
+        root = root.resolve()
         with self._workspace_lock_guard:
-            return self._workspace_locks.setdefault(path, threading.Lock())
+            if any(
+                root.is_relative_to(other) or other.is_relative_to(root)
+                for other in self._active_worktrees
+            ):
+                return None
+            self._active_worktrees.add(root)
+            return root
+
+    def release_worktree(self, root: Path) -> None:
+        """在阶段完成、出错或取消后释放对应工作树。"""
+        with self._workspace_lock_guard:
+            self._active_worktrees.remove(root)
 
     def redact(self, value):
         """从持久化错误和工具日志中移除配置凭据。"""
@@ -446,10 +526,11 @@ class AgentRuntime:
 
     def close(self) -> None:
         """关闭所有会话与 MCP Server。"""
+        self.approvals.close()
         sessions = list(self._sessions.values())
         self._sessions.clear()
         for session in sessions:
-            session.close()
+            session.close(preserve_waiting=True)
         clients = list(self._mcp_clients.values())
         self._mcp_clients.clear()
         self._mcp_tools.clear()

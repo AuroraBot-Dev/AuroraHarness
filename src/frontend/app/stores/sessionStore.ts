@@ -1,8 +1,15 @@
 import { defineStore } from 'pinia'
 import type { SessionRecord } from '~/types/agent'
-import { normalizeSession, normalizeMessage } from '~/utils/normalizers'
+import {
+  isTerminalStatus,
+  isTerminalTaskStatus,
+  normalizeSession,
+  normalizeMessage,
+} from '~/utils/normalizers'
 import { runtimeRequest } from '~/utils/runtimeClient'
 import { useProjectStore } from '~/stores/projectStore'
+import { useTraceStore } from '~/stores/traceStore'
+import { mergeTask } from '~/utils/tasks'
 
 interface SessionCreateResult {
   sessionId: string
@@ -34,6 +41,43 @@ export const useSessionStore = defineStore('sessions', {
     upsert(raw: unknown) {
       const session = normalizeSession(raw as Record<string, unknown>)
       const index = this.sessions.findIndex((item) => item.id === session.id)
+      const previous = this.sessions[index]
+      if (previous) {
+        for (const run of previous.runs) {
+          const incoming = session.runs.findIndex((item) => item.id === run.id)
+          if (incoming < 0) session.runs.push(run)
+          else if (isTerminalStatus(run.status)) session.runs[incoming] = run
+        }
+        session.runs.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        for (const task of previous.tasks) {
+          const run = session.runs.find((item) => item.id === task.runId)
+          const incoming = session.tasks.findIndex((item) => item.id === task.id)
+          if (incoming >= 0)
+            session.tasks[incoming] = mergeTask(
+              task,
+              session.tasks[incoming]! as unknown as Record<string, unknown>,
+              session.id,
+              task.runId,
+            )
+          else if (isTerminalTaskStatus(task.status)) session.tasks.push(task)
+          else if (run && isTerminalStatus(run.status))
+            session.tasks.push({ ...task, status: run.status, statusInferred: true })
+        }
+        for (const task of session.tasks) {
+          const run = session.runs.find((item) => item.id === task.runId)
+          if (run && isTerminalStatus(run.status) && !isTerminalTaskStatus(task.status)) {
+            task.status = run.status
+            task.statusInferred = true
+          }
+        }
+        for (const approval of session.approvals)
+          if (
+            approval.status === 'pending' &&
+            session.runs.some((run) => run.id === approval.runId && isTerminalStatus(run.status))
+          )
+            approval.status = 'expired'
+        if (session.runs.length) session.status = session.runs.at(-1)!.status
+      }
       if (index >= 0) this.sessions[index] = session
       else this.sessions.push(session)
       return session
@@ -42,10 +86,16 @@ export const useSessionStore = defineStore('sessions', {
       this.activeSessionId = id
     },
     remove(id: string) {
+      useTraceStore().remove(this.getSession(id)?.runs.map((run) => run.id) ?? [])
       this.sessions = this.sessions.filter((item) => item.id !== id)
       if (this.activeSessionId === id) this.activeSessionId = null
     },
     removeByProject(projectId: string) {
+      useTraceStore().remove(
+        this.sessions
+          .filter((session) => session.projectId === projectId)
+          .flatMap((session) => session.runs.map((run) => run.id)),
+      )
       this.sessions = this.sessions.filter((item) => item.projectId !== projectId)
     },
     async loadAll() {
@@ -129,6 +179,7 @@ export const useSessionStore = defineStore('sessions', {
       await Promise.all(
         this.sessions.map((item) => runtimeRequest('session.delete', { sessionId: item.id })),
       )
+      useTraceStore().remove(this.sessions.flatMap((session) => session.runs.map((run) => run.id)))
       this.sessions = []
       this.activeSessionId = null
     },

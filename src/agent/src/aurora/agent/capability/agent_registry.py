@@ -1,4 +1,4 @@
-"""提供全局 Agent 发现、配置检查与连接测试。"""
+"""管理可调用 Agent 的发现、配置检查与连接测试。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 from langchain_core.messages import HumanMessage
 from sqlalchemy import func, select
 
-from aurora.agent.model_access.config import build_configured_llm
+from aurora.agent.model_access.client_factory import build_configured_llm
 from aurora.agent.store.database import dumps, now
 from aurora.agent.store.model import Agent, AgentRun, ModelConfig, ModelProvider, Run
 from aurora.agent.store.records import decode

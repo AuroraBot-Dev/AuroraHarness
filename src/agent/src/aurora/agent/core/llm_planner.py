@@ -7,14 +7,24 @@ from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    ValidationError,
+    field_validator,
+)
 
+from aurora.agent.model_access.token_usage import reported_token_usage
 from aurora.common.logging import get_logger
 from aurora.common.text import sanitize_text
 
 from ..tools.base import Tool, format_tools_for_llm
+from .plan_validation import PlanValidationError, validate_plan
 from .planner import ClarificationDecision
-from .state import Clarification, Effort, Task
+from .state import Clarification, Task
 
 log = get_logger(__name__)
 
@@ -22,23 +32,30 @@ log = get_logger(__name__)
 class PlannedTask(BaseModel):
     """LLM 规划出的单个任务。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     id: str
-    description: str = ""
+    description: str = Field(min_length=1, max_length=4096)
     effort: Literal["low", "medium", "high"]
     tool: str
     args: dict = Field(default_factory=dict)
+    depends_on: list[StrictStr | StrictInt] = Field(default_factory=list, strict=True)
 
     @field_validator("id", mode="before")
     @classmethod
     def _coerce_id(cls, value: object) -> str:
-        """容忍模型把 id 输出成数字等情况，统一转字符串。"""
-        return str(value)
+        """仅兼容整数 ID，不将空值和布尔值伪造成标识符。"""
+        if isinstance(value, str) or type(value) is int:
+            return str(value)
+        raise ValueError("任务 ID 必须是字符串或整数")
 
 
 class Plan(BaseModel):
     """LLM 规划出的任务列表。"""
 
-    tasks: list[PlannedTask]
+    model_config = ConfigDict(extra="forbid")
+
+    tasks: list[PlannedTask] = Field(min_length=1, max_length=256)
 
 
 class ClarificationAssessment(BaseModel):
@@ -60,7 +77,7 @@ PLANNER_SYSTEM = """
 必须只输出一个 JSON 对象，不要输出任何解释文字。JSON 结构如下：
 
 {{"tasks": [{{"id": "字符串", "description": "任务描述", "effort": "low",
-"tool": "工具名", "args": {{"参数名": "参数值"}}}}]}}
+"depends_on": [], "tool": "工具名", "args": {{"参数名": "参数值"}}}}]}}
 
 字段要求：
 - id：字符串，任务唯一标识
@@ -68,12 +85,14 @@ PLANNER_SYSTEM = """
 - effort：low / medium / high
 - tool：只能取上面列出的工具名
 - args：传给工具的参数对象，字段名与类型必须和上面「参数」标注一致
+- depends_on：同一计划内必须先成功的任务 ID 列表。若测试依赖生成的文件，让测试依赖生成任务。
+  新计划为每个任务填写此字段，独立任务填写 []。避免循环和无关的先后约束。
 
 示例：
 {{"tasks": [{{"id": "t1", "description": "列出项目文件结构", "effort": "low",
-"tool": "list_files", "args": {{"path": "."}}}}]}}
+"depends_on": [], "tool": "list_files", "args": {{"path": "."}}}}]}}
 
-最多 8 个任务，任务之间尽量独立以便并行。
+最多 {max_tasks} 个任务，任务之间尽量独立以便并行。参数必须符合工具声明，不能添加未知字段。
 """
 
 CLARIFIER_SYSTEM = """
@@ -95,9 +114,8 @@ class LLMPlanner:
     def __init__(self, llm, tools: Mapping[str, Tool]) -> None:
         tool_desc = format_tools_for_llm(tools)
         self._tool_names = list(tools.keys())
-        # DeepSeek 不支持 json_schema 严格模式、思考模式又不支持 tool_choice，
-        # 所以用 json_mode：要求模型输出 JSON 对象，再由 Pydantic 解析。
-        # include_raw=True 以便拿到原始响应里的 token 用量。
+        self._tools = dict(tools)
+        self._max_tasks = 8
         self._llm = llm.with_structured_output(Plan, method="json_mode", include_raw=True)
         self._prompt = ChatPromptTemplate.from_messages(
             [
@@ -107,6 +125,10 @@ class LLMPlanner:
         )
         self._tool_desc = tool_desc
         self.usage = {}
+
+    def set_max_tasks(self, maximum: int) -> None:
+        """将冻结的任务上限同步到规划提示和输出校验。"""
+        self._max_tasks = maximum
 
     def set_instructions(self, instructions: str) -> None:
         """将角色职责加入规划器系统消息。"""
@@ -121,23 +143,31 @@ class LLMPlanner:
         )
 
     def plan(self, goal: str) -> list[Task]:
+        """解析模型输出并在返回前拒绝无效任务或参数。"""
         goal = sanitize_text(goal)
-        log.info("LLM 规划开始，目标：%s", goal)
+        log.info("LLM 规划开始，目标长度：%d", len(goal))
         log.info("可用工具：%s", ", ".join(self._tool_names))
 
         chain = self._prompt | self._llm
-        result = chain.invoke({"goal": goal, "tools": self._tool_desc})
+        result = chain.invoke(
+            {"goal": goal, "tools": self._tool_desc, "max_tasks": self._max_tasks}
+        )
 
-        # include_raw=True 时返回 {"raw", "parsed", "parsing_error"}
         if isinstance(result, dict):
-            plan: Plan = result["parsed"]
+            parsed = result.get("parsed")
             raw = result.get("raw")
         else:
-            plan = result
+            parsed = result
             raw = None
 
-        # token 用量反馈
-        usage = getattr(raw, "usage_metadata", None) or {}
+        try:
+            plan = Plan.model_validate(parsed)
+        except ValidationError:
+            raise PlanValidationError(
+                "INVALID_PLANNER_RESPONSE", "模型没有返回有效的结构化计划"
+            ) from None
+
+        usage = reported_token_usage(raw)
         for key, value in usage.items():
             if isinstance(value, int):
                 self.usage[key] = self.usage.get(key, 0) + value
@@ -152,19 +182,13 @@ class LLMPlanner:
         log.info("LLM 规划出 %d 个子任务：", len(plan.tasks))
         for i, t in enumerate(plan.tasks, 1):
             log.info("  [%d] [%s] %s", i, t.effort, t.description)
-            log.info("      tool=%s args=%s", t.tool, t.args)
+            log.info("      tool=%s", t.tool)
 
-        # Pydantic 模型 → 现有的 Task TypedDict，graph.py 无需改动
-        return [
-            {
-                "id": t.id,
-                "description": t.description or f"执行工具 {t.tool}",
-                "effort": Effort(t.effort),
-                "tool": t.tool,
-                "args": t.args,
-            }
-            for t in plan.tasks
-        ]
+        return validate_plan(
+            [task.model_dump(exclude_unset=True) | {"args": task.args} for task in plan.tasks],
+            self._tools,
+            max_tasks=self._max_tasks,
+        )
 
 
 class LLMClarifier:

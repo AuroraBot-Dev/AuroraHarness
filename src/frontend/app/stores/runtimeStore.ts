@@ -5,11 +5,12 @@ import type {
   McpConnection,
   McpPackage,
   RunStatus,
+  SessionRecord,
   RuntimeEvent,
   RuntimeInfo,
-  TaskEffort,
+  TaskNode,
 } from '~/types/agent'
-import { normalizeTask } from '~/utils/normalizers'
+import { isTerminalStatus, isTerminalTaskStatus, normalizeRun } from '~/utils/normalizers'
 import {
   connectRuntime,
   onRuntimeEvent,
@@ -18,7 +19,9 @@ import {
 } from '~/utils/runtimeClient'
 import { useSessionStore } from '~/stores/sessionStore'
 import { useProjectStore } from '~/stores/projectStore'
+import { useTraceStore } from '~/stores/traceStore'
 import { PROTOCOL_VERSION_TEXT } from '~/utils/protocol'
+import { mergeTask } from '~/utils/tasks'
 
 let initialized: Promise<void> | null = null
 let unsubscribe: (() => void) | null = null
@@ -27,10 +30,21 @@ const streamBuffers = new Map<
   { sessionId: string; pending: string; timer?: ReturnType<typeof setTimeout> }
 >()
 type JsonRecord = Record<string, unknown>
+const taskEventStatus: Record<string, TaskNode['status']> = {
+  'task.started': 'running',
+  'task.waiting': 'waiting',
+  'task.completed': 'completed',
+  'task.failed': 'failed',
+  'task.blocked': 'blocked',
+  'task.cancelled': 'cancelled',
+  'task.interrupted': 'interrupted',
+}
 interface RuntimeUpdate {
   sessionId: string
   runId: string
   status: RunStatus
+  retry_of_run_id?: string | null
+  retry_task_id?: string | null
   state?: JsonRecord & {
     goal?: unknown
     report?: unknown
@@ -111,6 +125,9 @@ export const useRuntimeStore = defineStore('runtime', {
     approvals: [] as ApprovalRequest[],
     lastError: '',
     pendingInputs: {} as Record<string, { accepted: boolean }>,
+    pendingCancellations: {} as Record<string, boolean>,
+    pendingRetries: {} as Record<string, string>,
+    runRequests: {} as Record<string, { requestKey: string; runId: string }>,
     packages: [] as McpPackage[],
     connections: [] as McpConnection[],
     serverConnections: [] as McpConnection[],
@@ -119,6 +136,22 @@ export const useRuntimeStore = defineStore('runtime', {
   getters: {
     approvalsFor: (state) => (sessionId: string) =>
       state.approvals.filter((item) => item.sessionId === sessionId && item.status === 'pending'),
+    requestsFor: (state) => (sessionId: string) =>
+      state.approvals.filter(
+        (item) =>
+          item.sessionId === sessionId && (item.status === 'pending' || item.kind === 'approval'),
+      ),
+    activeRunId: (state) => (sessionId: string) => {
+      const session = useSessionStore().getSession(sessionId)
+      const requested = session?.runs.find((run) => run.id === state.runRequests[sessionId]?.runId)
+      return (
+        (requested && !isTerminalStatus(requested.status) ? requested.id : '') ||
+        [...(session?.runs ?? [])].reverse().find((run) => !isTerminalStatus(run.status))?.id ||
+        ''
+      )
+    },
+    retryPendingFor: (state) => (sessionId: string) =>
+      Object.values(state.pendingRetries).includes(sessionId),
   },
   actions: {
     async initialize() {
@@ -139,13 +172,13 @@ export const useRuntimeStore = defineStore('runtime', {
           }
           await useProjectStore().loadAll()
           await useSessionStore().loadAll()
-          this.approvals = []
-          for (const session of useSessionStore().sessions.filter(
-            (item) => item.status === 'waiting',
+          const sessions = useSessionStore()
+          this.approvals = this.approvals.filter((item) => sessions.getSession(item.sessionId))
+          for (const session of sessions.sessions.filter(
+            (item) => item.status === 'waiting' || item.id === sessions.activeSessionId,
           )) {
             const loaded = await useSessionStore().load(session.id)
-            for (const pending of loaded.approvals.filter((item) => item.status === 'pending'))
-              this.approvals.push({ ...pending, id: pending.interruptId || pending.id })
+            this.syncApprovals(loaded)
           }
           this.connectionStatus = 'connected'
         } catch (error) {
@@ -166,6 +199,9 @@ export const useRuntimeStore = defineStore('runtime', {
       await restartRuntimeBroker()
       useSessionStore().sessions = []
       this.approvals = []
+      this.pendingCancellations = {}
+      this.pendingRetries = {}
+      this.runRequests = {}
       useProjectStore().loaded = false
       await this.initialize()
     },
@@ -186,19 +222,27 @@ export const useRuntimeStore = defineStore('runtime', {
       })
       session.status = 'running'
       session.updatedAt = now
+      const requestKey = crypto.randomUUID()
+      this.runRequests[sessionId] = { requestKey, runId: '' }
+      const control = this.runRequests[sessionId]!
       this.info.activeRuns += 1
       try {
         const update = await runtimeRequest<RuntimeUpdate>('run.start', {
           sessionId,
           goal,
-          requestKey: crypto.randomUUID(),
+          requestKey,
         })
         this.applyUpdate(update)
-        await sessions.load(sessionId)
+        this.syncApprovals(await sessions.load(sessionId))
         return update
       } catch (error) {
-        session.status = 'failed'
-        const failedRun = [...session.runs]
+        const current = sessions.getSession(sessionId) ?? session
+        const controlledRun = current.runs.find((item) => item.id === control.runId)
+        if (controlledRun && isTerminalStatus(controlledRun.status))
+          return { sessionId, runId: controlledRun.id, status: controlledRun.status }
+        if (this.runRequests[sessionId]?.requestKey !== requestKey) throw error
+        current.status = 'failed'
+        const failedRun = [...current.runs]
           .reverse()
           .find((item) => ['queued', 'running', 'waiting'].includes(item.status))
         if (failedRun) {
@@ -206,7 +250,7 @@ export const useRuntimeStore = defineStore('runtime', {
           failedRun.error = error instanceof Error ? error.message : String(error)
           failedRun.updatedAt = new Date().toISOString()
         }
-        session.messages.push({
+        current.messages.push({
           id: `message_${crypto.randomUUID()}`,
           sessionId,
           role: 'assistant',
@@ -218,7 +262,77 @@ export const useRuntimeStore = defineStore('runtime', {
         })
         throw error
       } finally {
+        if (this.runRequests[sessionId]?.requestKey === requestKey)
+          Reflect.deleteProperty(this.runRequests, sessionId)
         this.info.activeRuns = Math.max(0, this.info.activeRuns - 1)
+      }
+    },
+    async retryRun(sessionId: string, sourceRunId: string, taskId?: string) {
+      if (this.connectionStatus !== 'connected') throw new Error('运行时未连接')
+      const sessions = useSessionStore()
+      const session = sessions.getSession(sessionId)
+      if (!session?.runs.some((run) => run.id === sourceRunId)) throw new Error('来源运行不存在')
+      if (sessions.isRunning(sessionId)) throw new Error('请先结束当前运行')
+      if (this.retryPendingFor(sessionId)) return
+      const key = `${sourceRunId}:${taskId ?? ''}`
+      this.pendingRetries[key] = sessionId
+      let created = false
+      try {
+        const result = await runtimeRequest<{ run: JsonRecord }>('run.retry', {
+          session_id: sessionId,
+          run_id: sourceRunId,
+          ...(taskId ? { task_id: taskId } : {}),
+        })
+        const run = normalizeRun(result.run, sessionId)
+        created = true
+        this.applyUpdate({
+          sessionId,
+          runId: run.id,
+          status: run.status,
+          state: { goal: run.objective },
+          retry_of_run_id: run.retryOfRunId,
+          retry_task_id: run.retryTaskId,
+        })
+        if (
+          !isTerminalStatus(
+            sessions.getSession(sessionId)?.runs.find((item) => item.id === run.id)?.status ?? '',
+          )
+        )
+          this.runRequests[sessionId] = { requestKey: key, runId: run.id }
+        this.syncApprovals(await sessions.load(sessionId))
+        return run
+      } catch (error) {
+        if (!created) {
+          try {
+            this.syncApprovals(await sessions.load(sessionId))
+          } catch {
+            this.lastError = error instanceof Error ? error.message : String(error)
+          }
+        }
+        throw error
+      } finally {
+        Reflect.deleteProperty(this.pendingRetries, key)
+      }
+    },
+    async cancelRun(sessionId: string) {
+      if (this.connectionStatus !== 'connected') throw new Error('运行时未连接')
+      const runId = this.activeRunId(sessionId)
+      if (!runId || this.pendingCancellations[runId]) return
+      this.pendingCancellations[runId] = true
+      try {
+        const result = await runtimeRequest<{ accepted: boolean }>('run.cancel', {
+          session_id: sessionId,
+          run_id: runId,
+        })
+        if (!result.accepted) Reflect.deleteProperty(this.pendingCancellations, runId)
+        const current = await useSessionStore().load(sessionId)
+        this.syncApprovals(current)
+        const run = current.runs.find((item) => item.id === runId)
+        if (run && isTerminalStatus(run.status))
+          this.applyUpdate({ sessionId, runId, status: run.status })
+      } catch (error) {
+        Reflect.deleteProperty(this.pendingCancellations, runId)
+        throw error
       }
     },
     async resumeInput(id: string, response: unknown) {
@@ -228,12 +342,12 @@ export const useRuntimeStore = defineStore('runtime', {
       const session = useSessionStore().getSession(request.sessionId)
       const run = session?.runs.find((item) => item.id === request.runId)
       this.pendingInputs[id] = { accepted: false }
-      request.status =
-        response === false || (isRecord(response) && response.approved === false)
-          ? 'rejected'
-          : 'approved'
-      if (session) session.status = 'running'
-      if (run) run.status = 'running'
+      const approval = request.kind === 'approval' || !request.kind
+      if (!approval) {
+        request.status = 'approved'
+        if (session) session.status = 'running'
+        if (run) run.status = 'running'
+      }
       try {
         const update = await runtimeRequest<RuntimeUpdate>('run.resume', {
           sessionId: request.sessionId,
@@ -241,8 +355,18 @@ export const useRuntimeStore = defineStore('runtime', {
           interruptId: request.interruptId || request.id,
           response,
         })
+        if (approval && request.status === 'pending')
+          request.status =
+            response === false || (isRecord(response) && response.approved === false)
+              ? 'rejected'
+              : 'approved'
         this.applyUpdate(update)
       } catch (error) {
+        const currentRun = useSessionStore()
+          .getSession(request.sessionId)
+          ?.runs.find((item) => item.id === request.runId)
+        if (currentRun && isTerminalStatus(currentRun.status)) return
+        if (request.resolvedAt) throw error
         if (!this.pendingInputs[id]?.accepted) {
           request.status = 'pending'
           if (session) session.status = 'waiting'
@@ -258,10 +382,97 @@ export const useRuntimeStore = defineStore('runtime', {
       } finally {
         Reflect.deleteProperty(this.pendingInputs, id)
       }
-      await useSessionStore().load(request.sessionId)
+      this.syncApprovals(await useSessionStore().load(request.sessionId))
     },
     async resolveApproval(id: string, approved: boolean) {
-      await this.resumeInput(id, { approved })
+      const request = this.approvals.find((item) => item.id === id)
+      if (!request) throw new Error('待处理请求不存在')
+      if (request.status !== 'pending' || this.pendingInputs[id]) return
+      if (!request.approvalId) return this.resumeInput(id, { approved })
+      this.pendingInputs[id] = { accepted: false }
+      const submission = this.pendingInputs[id]!
+      try {
+        const result = await runtimeRequest<{ accepted: boolean }>('approval.resolve', {
+          session_id: request.sessionId,
+          run_id: request.runId,
+          approval_id: request.approvalId,
+          approved,
+        })
+        if (!result.accepted) throw new Error('运行时未接受审批')
+        if (this.pendingInputs[id]) this.pendingInputs[id]!.accepted = true
+        try {
+          this.syncApprovals(await useSessionStore().load(request.sessionId))
+        } catch (error) {
+          this.lastError = error instanceof Error ? error.message : String(error)
+        }
+      } catch (error) {
+        if (this.pendingInputs[id] === submission) Reflect.deleteProperty(this.pendingInputs, id)
+        try {
+          const loaded = await useSessionStore().load(request.sessionId)
+          this.syncApprovals(loaded)
+          const run = loaded.runs.find((item) => item.id === request.runId)
+          if (run && isTerminalStatus(run.status))
+            this.applyUpdate({ sessionId: request.sessionId, runId: run.id, status: run.status })
+        } catch {
+          this.lastError = error instanceof Error ? error.message : String(error)
+        }
+        throw error
+      }
+    },
+    syncApprovals(session: SessionRecord) {
+      for (const incoming of session.approvals) {
+        const existing = this.approvals.find(
+          (item) =>
+            item.sessionId === session.id &&
+            (item.id === incoming.id ||
+              (item.approvalId && item.approvalId === incoming.approvalId)),
+        )
+        if (!existing) this.approvals.push({ ...incoming })
+        else if (
+          !existing.resolvedAt &&
+          (existing.status === 'pending' || incoming.status !== 'pending')
+        )
+          Object.assign(existing, incoming)
+        if (incoming.status !== 'pending') Reflect.deleteProperty(this.pendingInputs, incoming.id)
+      }
+    },
+    applyApprovalResolution(sessionId: string, runId: string, payload: JsonRecord) {
+      const approvalId = String(payload.approval_id ?? payload.approvalId ?? '')
+      const interruptId = String(payload.interrupt_id ?? payload.interruptId ?? '')
+      let request = this.approvals.find(
+        (item) =>
+          item.sessionId === sessionId &&
+          item.runId === runId &&
+          ((approvalId && item.approvalId === approvalId) ||
+            (interruptId && item.id === interruptId)),
+      )
+      if (!request) {
+        request = {
+          id: interruptId || approvalId,
+          approvalId,
+          sessionId,
+          runId,
+          kind: 'approval',
+          action: '操作审批',
+          risk: '',
+          status: 'pending',
+        }
+        this.approvals.push(request)
+      }
+      if (request.resolvedAt) return
+      request.resolution = String(
+        payload.resolution ?? (payload.approved === true ? 'approved' : 'rejected'),
+      )
+      request.status =
+        request.resolution === 'approved'
+          ? 'approved'
+          : request.resolution === 'rejected'
+            ? 'rejected'
+            : 'expired'
+      request.resolvedAt = String(
+        payload.resolved_at ?? payload.resolvedAt ?? new Date().toISOString(),
+      )
+      Reflect.deleteProperty(this.pendingInputs, request.id)
     },
     applyUpdate(update: RuntimeUpdate) {
       const sessions = useSessionStore()
@@ -274,10 +485,13 @@ export const useRuntimeStore = defineStore('runtime', {
         .find((item) => item.role === 'user' && !item.runId)
       if (userMessage) userMessage.runId = runId
       const run = session.runs.find((item) => item.id === runId)
+      if (run && isTerminalStatus(run.status) && run.status !== update.status) return
       const goal = String(update.state?.goal ?? run?.objective ?? '')
       if (run) {
         run.status = update.status
         run.updatedAt = now
+        run.retryOfRunId = update.retry_of_run_id ?? run.retryOfRunId
+        run.retryTaskId = update.retry_task_id ?? run.retryTaskId
       } else
         session.runs.push({
           id: runId,
@@ -287,40 +501,67 @@ export const useRuntimeStore = defineStore('runtime', {
           error: '',
           createdAt: now,
           updatedAt: now,
+          retryOfRunId: update.retry_of_run_id,
+          retryTaskId: update.retry_task_id,
         })
       const results = new Map(
-        (update.state?.results ?? []).map((item) => [String(item.task_id), item]),
+        (update.state?.results ?? []).map((item) => [String(item.task_id ?? item.taskId), item]),
+      )
+      const waitingTasks = new Set(
+        (update.interruptions ?? []).map((item) => item.taskId ?? item.task_id),
       )
       for (const raw of update.state?.tasks ?? []) {
         const result = results.get(String(raw.id))
         const task = session.tasks.find((item) => item.id === String(raw.id))
-        const next = {
-          id: String(raw.id),
-          sessionId: session.id,
-          runId,
-          parentId: null,
-          description: String(raw.description ?? '未命名任务'),
-          tool: String(raw.tool ?? ''),
-          effort: (['low', 'medium', 'high'].includes(String(raw.effort))
-            ? raw.effort
-            : 'medium') as TaskEffort,
-          status: result
-            ? result.ok
-              ? 'completed'
+        if (!raw.id || (task && task.runId !== runId)) continue
+        const patch = { ...raw }
+        if (result) {
+          const blockedBy = result.blockedBy ?? result.blocked_by ?? raw.blockedBy ?? raw.blocked_by
+          patch.status = result.ok
+            ? 'completed'
+            : raw.status === 'blocked' || (Array.isArray(blockedBy) && blockedBy.length > 0)
+              ? 'blocked'
               : 'failed'
-            : update.status === 'waiting'
-              ? 'waiting'
-              : 'queued',
-          output: String(result?.output ?? ''),
-          error: result?.ok === false ? String(result.output ?? '') : '',
-          createdAt: task?.createdAt ?? now,
-          updatedAt: now,
-        } as const
+          if (Array.isArray(blockedBy)) patch.blockedBy = blockedBy
+          if (result.output !== undefined) {
+            patch.output = patch.status === 'blocked' ? '' : result.output
+            patch.error = result.ok ? '' : result.output
+          }
+        } else if (
+          update.status === 'waiting' &&
+          waitingTasks.has(raw.id) &&
+          !isTerminalTaskStatus(String(raw.status))
+        ) {
+          patch.status = 'waiting'
+        }
+        const next = mergeTask(task, patch, session.id, runId)
         if (task) Object.assign(task, next)
         else session.tasks.push(next)
       }
-      session.status = update.status
+      if (session.runs.at(-1)?.id === runId) session.status = update.status
       session.updatedAt = now
+      if (isTerminalStatus(update.status)) {
+        if (this.runRequests[session.id]?.runId === runId)
+          Reflect.deleteProperty(this.runRequests, session.id)
+        Reflect.deleteProperty(this.pendingCancellations, runId)
+        for (const request of this.approvals.filter((item) => item.runId === runId)) {
+          if (request.status === 'pending') request.status = 'expired'
+          Reflect.deleteProperty(this.pendingInputs, request.id)
+        }
+        for (const task of session.tasks.filter((item) => item.runId === runId))
+          if (!isTerminalTaskStatus(task.status)) {
+            task.status = update.status
+            task.statusInferred = true
+          }
+        for (const message of session.messages.filter(
+          (item) => item.runId === runId && item.status === 'streaming',
+        )) {
+          const buffer = streamBuffers.get(message.id)
+          if (buffer?.timer) clearTimeout(buffer.timer)
+          streamBuffers.delete(message.id)
+          message.status = update.status === 'cancelled' ? 'cancelled' : 'completed'
+        }
+      }
       if (
         update.status === 'completed' &&
         update.state?.report &&
@@ -338,12 +579,29 @@ export const useRuntimeStore = defineStore('runtime', {
           attachments: [],
         })
       }
-      for (const pending of update.interruptions ?? [])
-        this.addInterruption(session.id, runId, pending)
+      if (!isTerminalStatus(update.status))
+        for (const pending of update.interruptions ?? [])
+          this.addInterruption(session.id, runId, pending)
     },
     addInterruption(sessionId: string, runId: string, pending: JsonRecord) {
-      const id = String(pending.interruptId ?? '')
-      if (!id || this.approvals.some((item) => item.id === id)) return
+      const approvalId = String(pending.approval_id ?? pending.approvalId ?? '')
+      const id = String(pending.interruptId ?? pending.interrupt_id ?? approvalId)
+      const existing = this.approvals.find(
+        (item) =>
+          item.sessionId === sessionId &&
+          (item.id === id || (approvalId && item.approvalId === approvalId)),
+      )
+      if (existing) {
+        if (approvalId) existing.approvalId = approvalId
+        if (pending.expires_at ?? pending.expiresAt)
+          existing.expiresAt = String(pending.expires_at ?? pending.expiresAt)
+        return
+      }
+      const run = useSessionStore()
+        .getSession(sessionId)
+        ?.runs.find((item) => item.id === runId)
+      if (run && isTerminalStatus(run.status)) return
+      if (!id) return
       const kind =
         pending.kind === 'clarification' ||
         pending.kind === 'evaluation' ||
@@ -352,14 +610,18 @@ export const useRuntimeStore = defineStore('runtime', {
           : 'approval'
       this.approvals.push({
         id,
+        approvalId,
+        expiresAt: String(pending.expires_at ?? pending.expiresAt ?? '') || null,
         interruptId: id,
         sessionId,
         runId,
         kind,
+        taskId: String(pending.task_id ?? pending.taskId ?? '') || null,
         previewRequired: Boolean(pending.previewRequired),
         actions: Array.isArray(pending.actions) ? pending.actions.map(String) : undefined,
         action: String(
           pending.action ??
+            pending.tool ??
             pending.question ??
             (kind === 'approval' ? '执行受保护操作' : '需要你的输入'),
         ),
@@ -370,6 +632,7 @@ export const useRuntimeStore = defineStore('runtime', {
       })
     },
     async handleEvent(event: RuntimeEvent) {
+      useTraceStore().handleEvent(event)
       if (event.type === 'runtime.disconnected') {
         this.connectionStatus = 'disconnected'
         this.lastError = '运行时已断开'
@@ -378,7 +641,52 @@ export const useRuntimeStore = defineStore('runtime', {
       const payload = event.payload ?? {}
       const sessionId = String(event.session_id ?? payload.sessionId ?? payload.session_id ?? '')
       const runId = String(event.run_id ?? payload.runId ?? payload.run_id ?? '')
+      if (event.type === 'approval.resolved') {
+        this.applyApprovalResolution(sessionId, runId, payload)
+        return
+      }
       const session = useSessionStore().getSession(sessionId)
+      const knownRun = session?.runs.find((item) => item.id === runId)
+      if (session && event.type.startsWith('task.')) {
+        const taskId = String(
+          event.task_id ?? payload.taskId ?? payload.task_id ?? payload.id ?? '',
+        )
+        const raw = isRecord(payload.task) ? { ...payload.task } : {}
+        const id = taskId || String(raw.id ?? '')
+        const existing = session.tasks.find((task) => task.id === id)
+        if (!id || (existing && existing.runId !== runId)) return
+        const status = taskEventStatus[event.type]
+        if (
+          knownRun &&
+          isTerminalStatus(knownRun.status) &&
+          !existing &&
+          !isTerminalTaskStatus(status ?? String(raw.status))
+        )
+          return
+        const task = mergeTask(
+          existing,
+          {
+            ...raw,
+            id,
+            ...(payload.output !== undefined ? { output: payload.output } : {}),
+            ...(payload.error !== undefined ? { error: payload.error } : {}),
+          },
+          sessionId,
+          runId,
+          status,
+          event.occurred_at,
+        )
+        if (existing) Object.assign(existing, task)
+        else session.tasks.push(task)
+        return
+      }
+      if (knownRun && isTerminalStatus(knownRun.status)) return
+      if (
+        event.type === 'run.started' &&
+        this.runRequests[sessionId] &&
+        !this.runRequests[sessionId]!.runId
+      )
+        this.runRequests[sessionId]!.runId = runId
       if (event.type === 'run.resumed') {
         for (const request of this.approvals) {
           const pending = this.pendingInputs[request.id]
@@ -406,15 +714,32 @@ export const useRuntimeStore = defineStore('runtime', {
             error: '',
             createdAt: now,
             updatedAt: now,
+            retryOfRunId: String(payload.retry_of_run_id ?? '') || null,
+            retryTaskId: String(payload.retry_task_id ?? '') || null,
           })
         }
         session.status = 'running'
       }
-      if (['run.completed', 'run.failed', 'run.cancelled', 'run.interrupted'].includes(event.type))
-        this.applyUpdate(payload as unknown as RuntimeUpdate)
+      if (
+        ['run.completed', 'run.failed', 'run.cancelled', 'run.interrupted'].includes(event.type)
+      ) {
+        this.applyUpdate({ ...payload, sessionId, runId } as unknown as RuntimeUpdate)
+        if (
+          event.type === 'run.cancelled' ||
+          payload.retry_of_run_id ||
+          session?.runs.find((run) => run.id === runId)?.retryOfRunId
+        ) {
+          try {
+            this.syncApprovals(await useSessionStore().load(sessionId))
+          } catch (error) {
+            this.lastError = error instanceof Error ? error.message : String(error)
+          }
+        }
+      }
       if (
         [
           'approval.required',
+          'approval.requested',
           'clarification.required',
           'evaluation.required',
           'run.input_required',
@@ -424,25 +749,11 @@ export const useRuntimeStore = defineStore('runtime', {
       }
       if (session && event.type === 'plan.created') {
         for (const raw of records(payload.tasks)) {
-          const task = normalizeTask(raw, sessionId, runId)
-          const index = session.tasks.findIndex((item) => item.id === task.id)
-          if (index >= 0) session.tasks[index] = task
+          const existing = session.tasks.find((task) => task.id === String(raw.id))
+          if (existing && existing.runId !== runId) continue
+          const task = mergeTask(existing, raw, sessionId, runId)
+          if (existing) Object.assign(existing, task)
           else session.tasks.push(task)
-        }
-      }
-      if (session && event.type.startsWith('task.')) {
-        const taskId = String(
-          event.task_id ?? payload.taskId ?? payload.task_id ?? payload.id ?? '',
-        )
-        const task = session.tasks.find((item) => item.id === taskId)
-        if (task && event.type === 'task.started') task.status = 'running'
-        if (task && event.type === 'task.completed') {
-          task.status = 'completed'
-          task.output = String(payload.output ?? '')
-        }
-        if (task && event.type === 'task.failed') {
-          task.status = 'failed'
-          task.error = String(payload.error ?? '')
         }
       }
       if (session && event.type.startsWith('message.')) {

@@ -9,13 +9,13 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from aurora.common.cancellation import CANCEL_EVENT
+
 MAX_OUTPUT_BYTES = 64 * 1024
-CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar("preview_cancel", default=None)
 SandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
 
 
@@ -117,6 +117,9 @@ def run_process(
     on_started: Callable[[subprocess.Popen[Any]], None] | None = None,
 ) -> ExecutionResult:
     """执行进程并以固定内存上限收集输出。"""
+    cancelled = CANCEL_EVENT.get()
+    if cancelled is not None and cancelled.is_set():
+        return ExecutionResult(-1, "", "执行已取消", False, False, 0)
     started = time.monotonic()
     child_env = dict(os.environ)
     if env:
@@ -161,12 +164,14 @@ def run_process(
     for thread in threads:
         thread.start()
     timed_out = False
+    stopping = False
+    deadline = time.monotonic() + timeout
     try:
-        deadline = time.monotonic() + timeout
         while process.poll() is None:
             cancelled = CANCEL_EVENT.get()
             if cancelled is not None and cancelled.is_set():
                 _kill_process_tree(process)
+                stopping = True
                 process.wait()
                 break
             remaining = deadline - time.monotonic()
@@ -179,9 +184,18 @@ def run_process(
     except subprocess.TimeoutExpired:
         timed_out = True
         _kill_process_tree(process)
+        stopping = True
         process.wait()
-    for thread in threads:
-        thread.join()
+    while any(thread.is_alive() for thread in threads):
+        cancelled = CANCEL_EVENT.get()
+        if not stopping and (
+            (cancelled is not None and cancelled.is_set()) or time.monotonic() >= deadline
+        ):
+            timed_out = not (cancelled is not None and cancelled.is_set())
+            _kill_process_tree(process)
+            stopping = True
+        for thread in threads:
+            thread.join(timeout=0.01)
     duration_ms = int((time.monotonic() - started) * 1000)
     return ExecutionResult(
         exit_code=process.returncode,

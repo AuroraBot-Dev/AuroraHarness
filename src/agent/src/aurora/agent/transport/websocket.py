@@ -6,12 +6,13 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping
+from contextlib import suppress
 
 from websockets.asyncio.server import ServerConnection, serve
 
 from aurora.common.text import sanitize_value
 
-from .api import RuntimeApi
+from .runtime_api import RuntimeApi
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,19 @@ async def serve_websocket(api: RuntimeApi, host: str = "127.0.0.1", port: int = 
         logger.info("WebSocket 客户端已连接: %s", websocket.remote_address)
         workers = set()
         slots = asyncio.Semaphore(4)
+        notifications = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def notify(frame):
+            loop.call_soon_threadsafe(notifications.put_nowait, frame)
+
+        async def send_notifications():
+            while True:
+                frame = await notifications.get()
+                await websocket.send(json.dumps(sanitize_value(frame), ensure_ascii=False))
+
+        unsubscribe = api.subscribe(notify)
+        sender = asyncio.create_task(send_notifications())
 
         async def process_request(value):
             """桥接单个请求的响应和进度。"""
@@ -79,7 +93,13 @@ async def serve_websocket(api: RuntimeApi, host: str = "127.0.0.1", port: int = 
                     continue
 
                 if "request_id" in request or "protocol_version" in request:
-                    if request.get("method") in {"run.start", "run.resume", "agent.test"}:
+                    if request.get("method") in {
+                        "run.start",
+                        "run.resume",
+                        "run.retry",
+                        "agent.test",
+                        "approval.resolve",
+                    }:
                         worker = asyncio.create_task(run_request(request))
                         workers.add(worker)
                         worker.add_done_callback(workers.discard)
@@ -96,6 +116,10 @@ async def serve_websocket(api: RuntimeApi, host: str = "127.0.0.1", port: int = 
         except Exception:
             logger.debug("WebSocket 客户端断开", exc_info=True)
         finally:
+            unsubscribe()
+            sender.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await sender
             if workers:
                 await asyncio.gather(*workers, return_exceptions=True)
             logger.info("WebSocket 客户端已断开: %s", websocket.remote_address)

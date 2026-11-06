@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from aurora.agent.core import Effort, NoClarifier
 from aurora.agent.orchestration.runtime import AgentRuntime
-from aurora.agent.orchestration.workflows import Finding, ReviewResult
+from aurora.agent.orchestration.workflow_session import Finding, ReviewResult
 from aurora.agent.sandbox import Sandbox, UnsafeSubprocessExecutor
 from aurora.agent.store.database import Database
 from aurora.agent.transport import RuntimeApi
@@ -102,7 +102,7 @@ class Planner:
         ]
 
 
-def runtime_at(tmp_path, responses=None, capture=None):
+def runtime_at(tmp_path, responses=None, capture=None, **runtime_options):
     """创建使用真实文件数据库的可控运行时。"""
     goals, calls = [], []
     runtime = AgentRuntime(
@@ -116,6 +116,7 @@ def runtime_at(tmp_path, responses=None, capture=None):
             root, mode=mode, executor=UnsafeSubprocessExecutor()
         ),
         capture=capture or Capture(),
+        **runtime_options,
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -196,14 +197,17 @@ def test_restart_preserves_history_and_prevents_old_approval_replay(tmp_path):
     first = session.start("用户偏好：蓝色", mode="say")
     paused = session.start("写页面")
     assert paused.status == "waiting"
+    runtime.approvals.close()
     runtime.records.close()
     session.repository.close()
     restarted, _, later_goals, _ = runtime_at(tmp_path)
     saved = restarted.records.get("runs", paused.run_id)
-    assert saved["status"] == "interrupted"
+    assert saved["status"] == "waiting"
     restored = restarted.get_session(session.id)
     with pytest.raises(ValueError, match="旧审批"):
         restored.resume(paused.run_id, {"approved": True}, paused.interruptions[0].id)
+    assert not (workspace / "index.html").exists()
+    assert restored.cancel(paused.run_id)[0]
     restored.record["approval_mode"] = "always"
     restarted.records.update("sessions", session.id, approval_mode="always")
     restored.start("按我的偏好调整页面")
@@ -254,7 +258,7 @@ def test_sqlite_migrations_foreign_keys_and_pagination(tmp_path):
     runtime, workspace, _, _ = runtime_at(tmp_path)
     store = runtime.records
     store.db.migrate()
-    assert store.db.one("SELECT COUNT(*) AS n FROM schema_migrations")["n"] == 2
+    assert store.db.one("SELECT COUNT(*) AS n FROM schema_migrations")["n"] == 7
     assert store.db.one("PRAGMA foreign_keys")["foreign_keys"] == 1
     assert store.db.one("PRAGMA journal_mode")["journal_mode"] == "wal"
     with pytest.raises(IntegrityError):
@@ -327,7 +331,7 @@ def test_persistence_protocol_roundtrip_and_deletion(tmp_path):
 
 def test_failed_migration_rolls_back_ddl_and_version(tmp_path, monkeypatch):
     db = Database(tmp_path / "migration.db")
-    migration = tmp_path / "003_broken.sql"
+    migration = tmp_path / "999_broken.sql"
     migration.write_text(
         "CREATE TABLE partial(id TEXT); INSERT INTO nonexistent VALUES (1);", encoding="utf-8"
     )
@@ -341,7 +345,7 @@ def test_failed_migration_rolls_back_ddl_and_version(tmp_path, monkeypatch):
     with pytest.raises(sqlite3.OperationalError):
         db.migrate()
     assert db.one("SELECT name FROM sqlite_master WHERE name='partial'") is None
-    assert db.one("SELECT version FROM schema_migrations WHERE version=3") is None
+    assert db.one("SELECT version FROM schema_migrations WHERE version=999") is None
     db.close()
 
 

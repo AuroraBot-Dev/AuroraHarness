@@ -271,6 +271,7 @@ def test_wire_run_emits_progress_and_message_deltas(tmp_path):
         }
     )[0]["result"]
     frames = []
+    unsubscribe = api.subscribe(frames.append)
     api.process_wire(
         {
             "protocol_version": 1,
@@ -280,9 +281,19 @@ def test_wire_run_emits_progress_and_message_deltas(tmp_path):
         },
         frames.append,
     )
+    unsubscribe()
 
     event_types = [frame["type"] for frame in frames if "type" in frame]
-    assert event_types[:4] == ["run.started", "plan.created", "task.started", "task.completed"]
+    task_events = [name for name in event_types if not name.startswith(("stage.", "tool."))]
+    assert task_events[:4] == ["run.started", "plan.created", "task.started", "task.completed"]
+    assert [name for name in event_types if name.startswith("stage.")] == [
+        "stage.started",
+        "stage.completed",
+    ]
+    assert [name for name in event_types if name.startswith("tool.")] == [
+        "tool.started",
+        "tool.completed",
+    ]
     assert "message.started" in event_types
     assert "message.delta" in event_types
     assert "message.completed" in event_types

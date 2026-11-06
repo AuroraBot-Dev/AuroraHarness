@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from aurora.common.file_access import ensure_file_access, is_sensitive_path
+
 from .executor import ExecutionResult, SandboxExecutor, SandboxMode
-from .local import LocalSandboxExecutor
+from .local_executor import LocalSandboxExecutor
 
 DEFAULT_ROOT = Path(os.environ.get("AURORA_SANDBOX_DIR") or Path.home() / ".aurora" / "sandbox")
 _SKIP_PARTS = {"__pycache__", "node_modules", ".git"}
@@ -48,6 +50,7 @@ class Sandbox:
         """在沙箱内写入 UTF-8 文本文件。"""
         self._ensure_writable()
         target = self.resolve(path)
+        ensure_file_access(self.root / path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         rel = target.relative_to(self.root)
@@ -56,6 +59,7 @@ class Sandbox:
     def read_file(self, path: str) -> str:
         """读取沙箱内的 UTF-8 文本文件。"""
         target = self.resolve(path)
+        ensure_file_access(self.root / path)
         if not target.exists():
             return f"文件不存在: {target}"
         if target.is_dir():
@@ -70,6 +74,7 @@ class Sandbox:
     def list_files(self, path: str = ".") -> str:
         """递归列出沙箱内的目录结构。"""
         base = self.resolve(path)
+        ensure_file_access(self.root / path)
         if not base.exists():
             return f"路径不存在: {base}"
         if not base.is_dir():
@@ -79,6 +84,10 @@ class Sandbox:
         for item in sorted(base.rglob("*")):
             rel = item.relative_to(base)
             if _should_skip(rel):
+                continue
+            try:
+                ensure_file_access(item)
+            except (OSError, RuntimeError):
                 continue
             indent = "  " * (len(rel.parts) - 1)
             suffix = "/" if item.is_dir() else ""
@@ -128,6 +137,8 @@ class Sandbox:
 
 def _should_skip(rel: Path) -> bool:
     """跳过隐藏文件与常见构建缓存。"""
+    if is_sensitive_path(rel):
+        return True
     for part in rel.parts:
         if part.startswith("."):
             return True

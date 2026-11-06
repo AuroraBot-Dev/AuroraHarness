@@ -1,0 +1,5 @@
+CREATE TABLE run_checkpoints (
+ run_id TEXT NOT NULL PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+ version INTEGER NOT NULL,
+ payload_json TEXT NOT NULL
+);

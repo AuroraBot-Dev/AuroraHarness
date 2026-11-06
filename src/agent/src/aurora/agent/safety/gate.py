@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from typing import Any, Protocol
 
 from langgraph.types import interrupt
 from rich.console import Console
 
+from aurora.common.cancellation import check_cancelled
 from aurora.common.logging import get_logger
 
 from ..tools.base import RiskLevel, Tool
 
 log = get_logger(__name__)
+_TASK_ID: ContextVar[str | None] = ContextVar("approval_task_id", default=None)
 
 
 class ToolDeniedError(RuntimeError):
@@ -73,11 +76,12 @@ class InterruptApprover:
                 "tool": tool.name,
                 "risk": tool.risk.value,
                 "args": dict(args),
+                **({"taskId": _TASK_ID.get()} if _TASK_ID.get() else {}),
             }
         )
         if isinstance(response, Mapping):
-            return bool(response.get("approved", False))
-        return bool(response)
+            return response.get("approved") is True
+        return response is True
 
 
 class ConfirmationGate:
@@ -86,12 +90,25 @@ class ConfirmationGate:
     def __init__(self, approver: Approver | None = None) -> None:
         self._approver = approver or DenyApprover()
 
-    def invoke(self, tool: Tool, args: Mapping[str, Any]) -> str:
-        if not self._approver.approve(tool, args):
-            raise ToolDeniedError(
-                f"工具 {tool.name}（风险 {tool.risk.value}）需要用户确认，已拒绝执行"
-            )
-        return tool.run(**dict(args))
+    def invoke(
+        self,
+        tool: Tool,
+        args: Mapping[str, Any],
+        *,
+        run_tool: Callable[[], str] | None = None,
+        task_id: str | None = None,
+    ) -> str:
+        check_cancelled()
+        token = _TASK_ID.set(task_id)
+        try:
+            if not self._approver.approve(tool, args):
+                raise ToolDeniedError(
+                    f"工具 {tool.name}（风险 {tool.risk.value}）需要用户确认，已拒绝执行"
+                )
+        finally:
+            _TASK_ID.reset(token)
+        check_cancelled()
+        return run_tool() if run_tool else tool.run(**dict(args))
 
 
 def build_gate(mode: str = "interactive") -> ConfirmationGate:

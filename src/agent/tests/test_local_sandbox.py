@@ -14,7 +14,7 @@ from aurora.agent.sandbox import (
     SandboxUnavailableError,
     create_sandbox,
 )
-from aurora.agent.sandbox.local import _escape_sbpl
+from aurora.agent.sandbox.local_executor import _escape_sbpl
 
 
 def test_unknown_mode_is_rejected():

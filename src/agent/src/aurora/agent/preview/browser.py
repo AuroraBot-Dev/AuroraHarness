@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
+from aurora.common.cancellation import check_cancelled
+
 DEFAULT_VIEWPORTS = [{"width": 1440, "height": 900}, {"width": 390, "height": 844}]
 
 
@@ -55,6 +57,7 @@ class BrowserCapture:
         """返回截图字节、页面元数据和预览日志。"""
         from playwright.sync_api import sync_playwright
 
+        check_cancelled()
         config = validate_preview(config, sandbox)
         # 预览服务只在本机，探测可达性时必须绕开系统代理：CI（以及不少公司网络）会设置
         # HTTP_PROXY，此时连 127.0.0.1 也会被转发出去，表现为「预览服务启动超时」。
@@ -71,6 +74,7 @@ class BrowserCapture:
             try:
                 deadline = time.monotonic() + 20
                 while True:
+                    check_cancelled()
                     try:
                         with opener.open(config["url"], timeout=1) as response:
                             if response.status >= 400:
@@ -87,13 +91,16 @@ class BrowserCapture:
                     browser = playwright.chromium.launch()
                     try:
                         for viewport in config.get("viewports", DEFAULT_VIEWPORTS):
+                            check_cancelled()
                             context = browser.new_context(viewport=viewport, device_scale_factor=1)
                             try:
                                 page = context.new_page()
                                 page.set_default_timeout(10000)
                                 for path in config.get("pages", ["/"]):
+                                    check_cancelled()
                                     url = urljoin(config["url"], path)
                                     response = page.goto(url, wait_until="networkidle")
+                                    check_cancelled()
                                     if not response or response.status >= 400:
                                         raise ValueError("预览页面加载失败")
                                     if urlsplit(page.url).netloc != urlsplit(url).netloc:

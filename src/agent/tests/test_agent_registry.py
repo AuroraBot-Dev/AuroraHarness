@@ -11,8 +11,9 @@ from langchain_core.messages import AIMessage
 from sqlalchemy import select
 from test_persistence import runtime_at
 
-from aurora.agent.capability.registry import AgentRegistry
-from aurora.agent.core import Effort
+from aurora.agent.capability.agent_registry import AgentRegistry
+from aurora.agent.core import Effort, TaskBudget
+from aurora.agent.orchestration.runtime import RunExecutionError
 from aurora.agent.store.database import Database
 from aurora.agent.store.model import AgentRun
 
@@ -92,20 +93,20 @@ def test_delegate_multiple_approvals_do_not_replay(tmp_path, monkeypatch):
         assert result.status == "waiting"
         assert (workspace / "1.txt").read_text(encoding="utf-8") == "1"
         assert not (workspace / "2.txt").exists()
-        (workspace / "1.txt").write_text("不要重放", encoding="utf-8")
+        modified = (workspace / "1.txt").stat().st_mtime_ns
         result = session.resume(result.run_id, {"approved": True})
         assert result.status == "completed"
-        assert (workspace / "1.txt").read_text(encoding="utf-8") == "不要重放"
+        assert (workspace / "1.txt").stat().st_mtime_ns == modified
         assert (workspace / "2.txt").read_text(encoding="utf-8") == "2"
         rows = runtime.records.db.rows(select(AgentRun).where(AgentRun.agent_id == child["id"]))
         assert len(rows) == 1
         assert rows[0]["parent_task_id"]
         assert rows[0]["status"] == "completed"
-        assert (
-            json.loads(rows[0]["config_snapshot_json"])["agent"]["instructions"]
-            == child["instructions"]
-        )
-        assert child["instructions"] in seen
+        frozen = json.loads(rows[0]["config_snapshot_json"])
+        assert frozen["agent"]["instructions"].startswith(child["instructions"])
+        assert "新 Prompt" not in frozen["agent"]["instructions"]
+        assert frozen["effort_policy"]["effort"] == "low"
+        assert any(value.startswith(child["instructions"]) for value in seen)
     finally:
         runtime.close()
 
@@ -114,8 +115,9 @@ def test_delegate_denial_and_tool_permissions_fail_parent(tmp_path, monkeypatch)
     runtime, workspace, child, _ = setup_registry(tmp_path, monkeypatch, allowed=[])
     try:
         session = runtime.create_session(str(workspace), approval_mode="always")
-        with pytest.raises(RuntimeError, match="失败"):
+        with pytest.raises(RunExecutionError) as failure:
             session.start("不允许使用写入工具")
+        assert failure.value.code == "TOOL_NOT_ALLOWED"
         assert not (workspace / "1.txt").exists()
         rows = runtime.records.db.rows(select(AgentRun).where(AgentRun.agent_id == child["id"]))
         assert rows[0]["status"] == "failed"
@@ -183,7 +185,7 @@ def test_registry_migrates_existing_agents(tmp_path):
         assert db.one("SELECT model_type FROM model_configs")["model_type"] == "multimodal"
         assert db.one("SELECT callable FROM agents")["callable"] == 0
         db.migrate()
-        assert db.one("SELECT count(*) n FROM schema_migrations")["n"] == 2
+        assert db.one("SELECT count(*) n FROM schema_migrations")["n"] == 7
     finally:
         db.close()
 
@@ -276,7 +278,8 @@ def test_delegate_validates_and_passes_actual_images(tmp_path, monkeypatch, mode
 
         class ImagePlanner:
             def set_instructions(self, value):
-                assert value == child["instructions"]
+                assert value.startswith(child["instructions"])
+                assert "执行强度策略" in value
 
             def set_images(self, images):
                 assert images[0]["image_url"]["url"].endswith(
@@ -300,7 +303,9 @@ def test_delegate_validates_and_passes_actual_images(tmp_path, monkeypatch, mode
             "code_agent_run_id": agent_run,
             "task_ids": {"p": task_id},
             "iteration": 0,
-            "snapshot": {"approval_mode": "always"},
+            "snapshot": {"approval_mode": "always", "agents": [config]},
+            "task_budget": TaskBudget(runtime.execution_limits),
+            "capabilities": runtime.capabilities.freeze(),
         }
         task = {
             "id": "p",
@@ -315,7 +320,8 @@ def test_delegate_validates_and_passes_actual_images(tmp_path, monkeypatch, mode
         else:
             result = json.loads(execute_delegate(session, run_id, state, task, [config], None))
             assert result["status"] == "completed"
-            assert calls[0][0].content == child["instructions"]
+            assert calls[0][0].content.startswith(child["instructions"])
+            assert "执行强度策略" in calls[0][0].content
             assert calls[0][1].content[1]["type"] == "image_url"
         store.update(Run, run_id, status="completed")
     finally:
@@ -326,11 +332,14 @@ def test_ndjson_status_responds_during_long_run():
     import io
     import threading
 
-    from aurora.agent.transport.api import serve_ndjson
+    from aurora.agent.transport.runtime_api import serve_ndjson
 
     started, queried = threading.Event(), threading.Event()
 
     class Api:
+        def subscribe(self, emit):
+            return lambda: None
+
         def process_wire(self, request, emit):
             if request["method"] == "run.start":
                 started.set()
@@ -444,6 +453,9 @@ def test_websocket_status_responds_while_run_is_active():
     started, queried = threading.Event(), threading.Event()
 
     class Api:
+        def subscribe(self, emit):
+            return lambda: None
+
         def process_wire(self, request, emit):
             if request["method"] == "run.start":
                 started.set()

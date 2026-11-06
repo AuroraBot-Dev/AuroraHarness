@@ -3,13 +3,47 @@ import { NButton, NInput, NInputNumber, NTag } from 'naive-ui'
 import { AlertCircle, Check, X } from '~/utils/icons'
 import type { ApprovalRequest } from '~/types/agent'
 
-const props = defineProps<{ request: ApprovalRequest }>()
+const props = defineProps<{ request: ApprovalRequest; submitting?: boolean }>()
 const emit = defineEmits<{
   decide: [requestId: string, approved: boolean]
   respond: [requestId: string, response: unknown]
 }>()
 const answer = ref('')
 const score = ref(5)
+const currentTime = ref(Date.now())
+let ticker: ReturnType<typeof setInterval> | undefined
+const remaining = computed(() =>
+  props.request.expiresAt
+    ? Math.max(0, Math.ceil((Date.parse(props.request.expiresAt) - currentTime.value) / 1000))
+    : null,
+)
+const pastDeadline = computed(() => remaining.value !== null && remaining.value <= 0)
+const pending = computed(() => props.request.status === 'pending')
+const resultText = computed(() =>
+  props.request.resolution === 'timeout'
+    ? '审批已超时，操作已拒绝'
+    : props.request.status === 'approved'
+      ? '已允许此操作'
+      : props.request.status === 'rejected'
+        ? '已拒绝此操作'
+        : '审批已失效，操作未获批准',
+)
+watch(
+  () => [props.request.status, props.request.expiresAt],
+  () => {
+    if (ticker) clearInterval(ticker)
+    ticker = undefined
+    currentTime.value = Date.now()
+    if (pending.value && props.request.expiresAt)
+      ticker = setInterval(() => {
+        currentTime.value = Date.now()
+      }, 250)
+  },
+  { immediate: true },
+)
+onBeforeUnmount(() => {
+  if (ticker) clearInterval(ticker)
+})
 const actionLabels: Record<string, string> = {
   accept: '接受当前结果',
   cancel: '取消',
@@ -47,7 +81,9 @@ function submitInput() {
       <div class="approval-title">
         {{
           request.kind === 'approval' || !request.kind
-            ? '需要你的确认'
+            ? pending
+              ? '需要你的确认'
+              : '审批结果'
             : request.kind === 'evaluation'
               ? '评价本次结果'
               : '需要补充信息'
@@ -61,8 +97,32 @@ function submitInput() {
       </div>
       <p>{{ request.question || request.action }}</p>
       <p v-if="request.details">{{ request.details }}</p>
+      <p
+        v-if="!pending"
+        role="status"
+      >
+        {{ resultText }}
+      </p>
+      <p
+        v-else-if="pastDeadline"
+        role="status"
+      >
+        期限已到，等待运行时确认
+      </p>
+      <p
+        v-else-if="submitting"
+        role="status"
+      >
+        正在提交，等待运行时确认
+      </p>
+      <p
+        v-else-if="remaining !== null"
+        role="timer"
+      >
+        {{ remaining }} 秒后自动拒绝
+      </p>
       <div
-        v-if="request.kind === 'decision'"
+        v-if="pending && request.kind === 'decision'"
         class="input-row"
       >
         <NButton
@@ -74,7 +134,7 @@ function submitInput() {
         </NButton>
       </div>
       <div
-        v-else-if="request.previewRequired"
+        v-else-if="pending && request.previewRequired"
         class="preview-form"
       >
         <label>
@@ -104,7 +164,7 @@ function submitInput() {
         </NButton>
       </div>
       <div
-        v-else-if="request.kind === 'clarification'"
+        v-else-if="pending && request.kind === 'clarification'"
         class="input-row"
       >
         <NInput
@@ -121,7 +181,7 @@ function submitInput() {
         </NButton>
       </div>
       <div
-        v-else-if="request.kind === 'evaluation'"
+        v-else-if="pending && request.kind === 'evaluation'"
         class="input-row"
       >
         <NInputNumber
@@ -142,11 +202,12 @@ function submitInput() {
       </div>
     </div>
     <div
-      v-if="request.kind === 'approval' || !request.kind"
+      v-if="pending && (request.kind === 'approval' || !request.kind)"
       class="approval-actions"
     >
       <NButton
         size="small"
+        :disabled="submitting || pastDeadline"
         @click="emit('decide', request.id, false)"
       >
         <template #icon>
@@ -157,6 +218,7 @@ function submitInput() {
       <NButton
         size="small"
         type="primary"
+        :disabled="submitting || pastDeadline"
         @click="emit('decide', request.id, true)"
       >
         <template #icon><AppIcon :component="Check" /></template>

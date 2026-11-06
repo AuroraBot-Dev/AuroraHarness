@@ -9,7 +9,7 @@ from rich.tree import Tree
 
 from aurora.agent.conversation.session import ConversationSession, SessionReply
 from aurora.agent.orchestration.runtime import AgentRuntime
-from aurora.cli.workflow import respond_to_interrupt
+from aurora.cli.interactions import respond_to_interrupt
 from aurora.eval import JsonlFeedbackStore
 
 

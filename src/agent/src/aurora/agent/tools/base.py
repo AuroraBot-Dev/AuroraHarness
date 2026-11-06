@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import Any, Literal, get_args, get_origin, get_type_hints
 
 F = Callable[..., str]
 
@@ -40,18 +40,20 @@ class Tool:
     description: str
     func: F
     risk: RiskLevel = RiskLevel.READ
-    params_schema: dict[str, Any] = field(
-        default_factory=lambda: {"type": "object", "properties": {}}
-    )
+    params_schema: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """为直接创建的工具补全参数结构。"""
-        if not self.params_schema.get("properties"):
+        if not self.params_schema:
             self.params_schema = _schema_from_signature(self.func)
 
     def run(self, **kwargs: Any) -> str:
         """执行工具并返回文本结果。"""
-        return self.func(**_prepare_arguments(self.func, kwargs))
+        return self.func(**self.prepare_arguments(kwargs))
+
+    def prepare_arguments(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        """只验证并转换参数，不执行工具。"""
+        return _prepare_arguments(self.func, args)
 
 
 # ---------------------------------------------------------------------------
@@ -131,18 +133,23 @@ def _first_paragraph(docstring: str | None) -> str:
     return docstring.strip().split("\n", 1)[0].strip()
 
 
-def _annotation_to_json_type(annotation: Any) -> str:
-    """把 Python 类型注解映射为 JSON Schema 基本类型。"""
-    if annotation is inspect.Parameter.empty:
-        return "string"
+def _annotation_schema(annotation: Any) -> dict[str, Any]:
+    """为基础类型、容器和可空参数生成 JSON Schema。"""
+    if annotation in (inspect.Parameter.empty, Any):
+        return {}
     origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        return {"enum": list(args)}
+    if origin in (list, tuple, set):
+        return {"type": "array", **({"items": _annotation_schema(args[0])} if args else {})}
+    if origin in (dict, Mapping) or annotation is dict:
+        return {"type": "object"}
     if origin is not None:
-        # Optional[str] -> Union[str, None]：取第一个非 None 分支
-        args = [a for a in get_args(annotation) if a is not type(None)]
-        if args:
-            return _annotation_to_json_type(args[0])
-        return "string"
-    return _JSON_TYPE_MAP.get(annotation, "string")
+        return {"anyOf": [_annotation_schema(arg) for arg in args]} if args else {}
+    if annotation is type(None):
+        return {"type": "null"}
+    return {"type": _JSON_TYPE_MAP[annotation]} if annotation in _JSON_TYPE_MAP else {}
 
 
 def _base_annotation(annotation: Any) -> Any:
@@ -197,19 +204,27 @@ def _schema_from_signature(func: Callable[..., str]) -> dict[str, Any]:
     annotations = get_type_hints(func)
     properties: dict[str, Any] = {}
     required: list[str] = []
+    additional = False
     for pname, param in sig.parameters.items():
         if pname in ("self", "cls"):
             continue
-        prop: dict[str, Any] = {
-            "type": _annotation_to_json_type(annotations.get(pname, param.annotation)),
-        }
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            additional = True
+            continue
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            continue
+        prop = _annotation_schema(annotations.get(pname, param.annotation))
         if param.default is not inspect.Parameter.empty:
             prop["default"] = param.default
         else:
             required.append(pname)
         properties[pname] = prop
 
-    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": additional,
+    }
     if required:
         schema["required"] = required
     return schema

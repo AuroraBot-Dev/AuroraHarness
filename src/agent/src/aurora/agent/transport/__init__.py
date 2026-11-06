@@ -2,7 +2,7 @@
 
 from aurora.common.protocol import PROTOCOL_VERSION
 
-from .api import RuntimeApi, serve_ndjson
+from .runtime_api import RuntimeApi, serve_ndjson
 from .websocket import serve_websocket
 
 __all__ = ["PROTOCOL_VERSION", "RuntimeApi", "serve_ndjson", "serve_websocket"]
