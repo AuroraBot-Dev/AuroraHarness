@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 from ..sandbox import Sandbox, get_sandbox
+from ..sandbox.executor import ExecutionResult
 from .base import RiskLevel, Tool, tool
+
+
+def execution_output(result: ExecutionResult) -> str:
+    """只有成功退出的命令才作为成功工具结果返回。"""
+    output = result.render()
+    if result.exit_code != 0 or result.timed_out:
+        raise RuntimeError(output)
+    return output
 
 
 @tool(
@@ -23,7 +32,7 @@ def write_file(path: str, content: str) -> str:
 )
 def run_command(command: str, timeout: int = 30) -> str:
     """在沙箱内运行 shell 命令。"""
-    return get_sandbox().run(command, timeout=timeout).render()
+    return execution_output(get_sandbox().run(command, timeout=timeout))
 
 
 @tool(
@@ -33,7 +42,7 @@ def run_command(command: str, timeout: int = 30) -> str:
 )
 def run_python(code: str, timeout: int = 30) -> str:
     """在沙箱内运行 Python 代码。"""
-    return get_sandbox().run_python(code, timeout=timeout).render()
+    return execution_output(get_sandbox().run_python(code, timeout=timeout))
 
 
 @tool(
@@ -65,11 +74,11 @@ def build_sandbox_tools(sandbox: Sandbox) -> dict[str, Tool]:
 
     def bound_run_command(command: str, timeout: int = 30) -> str:
         """在绑定沙箱内运行 shell 命令。"""
-        return sandbox.run(command, timeout=timeout).render()
+        return execution_output(sandbox.run(command, timeout=timeout))
 
     def bound_run_python(code: str, timeout: int = 30) -> str:
         """在绑定沙箱内运行 Python 代码。"""
-        return sandbox.run_python(code, timeout=timeout).render()
+        return execution_output(sandbox.run_python(code, timeout=timeout))
 
     def bound_list_files(path: str = ".") -> str:
         """列出绑定沙箱目录结构。"""

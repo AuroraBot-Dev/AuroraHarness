@@ -18,7 +18,7 @@ from aurora.agent.model_access import build_llm
 from aurora.agent.safety import build_gate
 from aurora.agent.sandbox import create_sandbox, set_sandbox
 from aurora.agent.tools import get_available_tools
-from aurora.cli.workflow import respond_to_interrupt
+from aurora.cli.interactions import respond_to_interrupt
 
 DEFAULT_GOAL = "在沙箱里写一个 Python 脚本，输出 1 到 10 的平方，并运行它"
 

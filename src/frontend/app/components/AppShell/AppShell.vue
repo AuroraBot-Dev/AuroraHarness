@@ -1,139 +1,208 @@
 <script setup lang="ts">
-import { NLayout, NLayoutContent, NLayoutSider } from "naive-ui";
+import { NDrawer } from 'naive-ui'
+import type { TaskNode } from '~/types/agent'
 
-const ui = useUiStore();
-const compact = ref(false);
-const collapsed = computed(() => compact.value || ui.sidebarCollapsed);
-const edgeLeft = computed(() => `${8 + (collapsed.value ? 68 : 280) - 6}px`);
-let compactQuery: MediaQueryList | null = null;
+const ui = useUiStore()
+const route = useRoute()
+const projects = useProjectStore()
+const sessions = useSessionStore()
+const compact = ref(false)
+const mobile = ref(false)
+const overlayOpen = ref(false)
+const detailTask = ref<TaskNode | null>(null)
+const currentSession = computed(() => sessions.getSession(String(route.params.sessionId ?? '')))
+const workspace = computed(() => {
+  const id = String(
+    route.params.projectId ?? currentSession.value?.projectId ?? projects.activeProjectId ?? '',
+  )
+  return projects.byId(id) ?? projects.projects[0]
+})
+const workspaceSessions = computed(() => {
+  if (!workspace.value) return []
+  return sessions.sorted.filter(
+    (session) =>
+      session.projectId === workspace.value?.id ||
+      (!session.projectId && workspace.value?.id === projects.projects[0]?.id),
+  )
+})
+const tasks = computed(() => {
+  const session = currentSession.value
+  const runId = session?.runs.at(-1)?.id
+  return session && runId ? session.tasks.filter((task) => task.runId === runId) : []
+})
+const workspaceOpen = computed(() => (compact.value ? overlayOpen.value : !ui.sidebarCollapsed))
+const isCanvas = computed(() => route.path === '/' || route.path.startsWith('/projects/'))
+let compactQuery: MediaQueryList | null = null
+let mobileQuery: MediaQueryList | null = null
 
-function syncCompact(event?: MediaQueryListEvent) {
-  compact.value = event?.matches ?? compactQuery?.matches ?? false;
+function syncViewport() {
+  compact.value = compactQuery?.matches ?? false
+  mobile.value = mobileQuery?.matches ?? false
+  if (!compact.value) overlayOpen.value = false
+}
+
+function toggleWorkspace() {
+  if (compact.value) overlayOpen.value = !overlayOpen.value
+  else ui.toggleSidebar()
+}
+
+function closeWorkspace() {
+  if (compact.value) overlayOpen.value = false
+  else if (!ui.sidebarCollapsed) ui.toggleSidebar()
 }
 
 onMounted(() => {
-  compactQuery = window.matchMedia("(max-width: 860px)");
-  syncCompact();
-  compactQuery.addEventListener("change", syncCompact);
-});
-
-onBeforeUnmount(() => compactQuery?.removeEventListener("change", syncCompact));
+  compactQuery = window.matchMedia('(max-width: 1024px)')
+  mobileQuery = window.matchMedia('(max-width: 600px)')
+  syncViewport()
+  compactQuery.addEventListener('change', syncViewport)
+  mobileQuery.addEventListener('change', syncViewport)
+})
+onBeforeUnmount(() => {
+  compactQuery?.removeEventListener('change', syncViewport)
+  mobileQuery?.removeEventListener('change', syncViewport)
+})
 </script>
 
 <template>
-  <NLayout class="app-shell" has-sider>
-    <NLayoutSider
-      class="app-sider"
-      :width="collapsed ? 68 : 280"
-      :native-scrollbar="false"
-      content-style="height: 100%;"
-      bordered
-    >
-      <AppSidebar :collapsed="collapsed" />
-    </NLayoutSider>
-    <div
-      v-if="!compact"
-      class="sidebar-edge"
-      :style="{ left: edgeLeft }"
-      role="button"
-      tabindex="0"
-      :aria-label="collapsed ? '展开菜单' : '收起菜单'"
-      :aria-expanded="!collapsed"
-      @click="ui.toggleSidebar"
-      @keydown.enter.prevent="ui.toggleSidebar"
-      @keydown.space.prevent="ui.toggleSidebar"
-    >
-      <span />
+  <div
+    class="app-shell"
+    :class="{ 'panel-visible': !compact && workspaceOpen, 'is-canvas': isCanvas }"
+  >
+    <CanvasAtmosphere v-if="!route.path.startsWith('/sessions/')" />
+    <div class="app-rail">
+      <AppSidebar
+        :workspace="workspace"
+        :workspace-open="workspaceOpen"
+        @workspace="toggleWorkspace"
+      />
     </div>
-    <NLayoutContent
-      class="app-content"
-      content-style="height: 100%; overflow: hidden;"
+    <div
+      v-if="!compact && workspaceOpen"
+      id="workspace-panel"
+      class="app-workspace"
     >
-      <slot />
-    </NLayoutContent>
-  </NLayout>
+      <WorkspaceNavigator
+        :workspace="workspace"
+        :sessions="workspaceSessions"
+        :tasks="tasks"
+        @close="closeWorkspace"
+        @select-task="detailTask = $event"
+      />
+    </div>
+    <div class="app-content"><slot /></div>
+    <NDrawer
+      v-if="compact"
+      v-model:show="overlayOpen"
+      :placement="mobile ? 'bottom' : 'left'"
+      :width="mobile ? undefined : 320"
+      :height="mobile ? '82dvh' : undefined"
+      :auto-focus="false"
+      :style="{
+        maxWidth: '100vw',
+        background: 'var(--app-bg)',
+        borderRadius: mobile ? '24px 24px 0 0' : '0 24px 24px 0',
+      }"
+    >
+      <div
+        id="workspace-panel"
+        class="workspace-overlay"
+      >
+        <WorkspaceNavigator
+          :workspace="workspace"
+          :sessions="workspaceSessions"
+          :tasks="tasks"
+          @close="closeWorkspace"
+          @navigate="overlayOpen = false"
+          @select-task="detailTask = $event"
+        />
+      </div>
+    </NDrawer>
+    <TaskDetailsDrawer v-model:show="detailTask" />
+  </div>
 </template>
 
 <style scoped>
 .app-shell {
   position: relative;
-  width: 100vw;
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  width: 100%;
   height: 100vh;
   height: 100dvh;
-  padding: 8px;
-  gap: 8px;
-  background: var(--shell-bg);
+  isolation: isolate;
+  background: var(--app-bg);
   overflow: hidden;
 }
 
-.sidebar-edge {
-  position: absolute;
-  top: 16px;
-  bottom: 16px;
-  z-index: 10;
-  display: grid;
-  width: 12px;
-  place-items: center;
-  cursor: pointer;
-  outline: none;
+.app-shell.panel-visible {
+  grid-template-columns: 84px 232px minmax(0, 1fr);
 }
 
-.sidebar-edge span {
-  width: 1px;
-  height: 42px;
-  border-radius: 1px;
-  background: transparent;
-  transition:
-    background 120ms ease,
-    height 120ms ease;
-}
-.sidebar-edge:hover span,
-.sidebar-edge:focus-visible span {
-  height: 64px;
-  background: var(--text-muted);
+.app-shell > :deep(.canvas-atmosphere) {
+  opacity: 0.38;
+  transition: opacity 300ms ease;
 }
 
-.app-sider {
-  height: calc(100vh - 16px);
-  height: calc(100dvh - 16px);
-  border: 1px solid var(--glass-border) !important;
-  border-radius: 16px;
-  background: var(--sidebar-glass) !important;
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(22px) saturate(125%);
-  -webkit-backdrop-filter: blur(22px) saturate(125%);
-  overflow: hidden;
+.app-shell.is-canvas > :deep(.canvas-atmosphere) {
+  opacity: 1;
 }
 
-.app-sider :deep(.n-layout-sider-scroll-container) {
-  height: 100%;
-  background: transparent;
+.app-rail,
+.app-workspace {
+  position: relative;
+  z-index: 2;
+  min-height: 0;
+  background: var(--sidebar-glass);
+  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(135%);
+  backdrop-filter: blur(var(--material-blur)) saturate(135%);
+}
+
+.app-workspace {
+  box-shadow:
+    inset 1px 0 0 var(--glass-edge),
+    1px 0 0 var(--glass-edge);
 }
 
 .app-content {
+  position: relative;
+  z-index: 1;
   min-width: 0;
-  margin-left: 8px;
-  height: calc(100vh - 16px);
-  height: calc(100dvh - 16px);
-  border: 1px solid var(--glass-border);
-  border-radius: 16px;
-  background: var(--content-glass);
-  box-shadow: var(--glass-shadow-soft);
+  min-height: 0;
+  background: transparent;
   overflow: hidden;
 }
 
-@media (max-width: 680px) {
-  .app-shell {
-    padding: 5px;
-    gap: 5px;
+.workspace-overlay {
+  height: 100%;
+  overflow: hidden;
+}
+
+@media (max-width: 1024px) {
+  .app-shell.panel-visible {
+    grid-template-columns: 84px minmax(0, 1fr);
   }
-  .app-content {
-    margin-left: 5px;
+
+  .app-workspace {
+    display: none;
   }
-  .app-sider,
+}
+
+@media (max-width: 600px) {
+  .app-shell,
+  .app-shell.panel-visible {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) calc(64px + env(safe-area-inset-bottom));
+  }
+
+  .app-rail {
+    grid-row: 2;
+    padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: 0 -1px 0 var(--glass-edge);
+  }
+
   .app-content {
-    height: calc(100dvh - 10px);
-    border-radius: 13px;
+    grid-row: 1;
   }
 }
 </style>

@@ -141,12 +141,14 @@ const tasks = {
     step('uv', ['run', '--frozen', 'ruff', 'format', '--check', '.'])
     step('uv', ['run', '--frozen', 'pyright'])
     pnpmRun('lint')
+    pnpmRun('format:check')
   },
 
   fmt() {
     step('uv', ['run', '--frozen', 'ruff', 'format', '.'])
     step('uv', ['run', '--frozen', 'ruff', 'check', '--fix', '.'])
     pnpmRun('lint:fix')
+    pnpmRun('format')
   },
 
   'test-python': () => step('uv', ['run', '--frozen', 'pytest']),

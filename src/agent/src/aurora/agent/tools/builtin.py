@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aurora.common.file_access import ensure_file_access, is_sensitive_path
+
 from .base import RiskLevel, tool
 
 
@@ -14,7 +16,7 @@ from .base import RiskLevel, tool
 )
 def list_files(path: str = ".") -> str:
     """递归列出目录结构（跳过隐藏文件与构建缓存）。"""
-    root = Path(path).resolve()
+    root = ensure_file_access(Path(path))
     if not root.exists():
         return f"路径不存在: {root}"
     if not root.is_dir():
@@ -24,6 +26,10 @@ def list_files(path: str = ".") -> str:
     for item in sorted(root.rglob("*")):
         rel = item.relative_to(root)
         if _should_skip(rel):
+            continue
+        try:
+            ensure_file_access(item)
+        except (OSError, RuntimeError):
             continue
         indent = "  " * (len(rel.parts) - 1)
         suffix = "/" if item.is_dir() else ""
@@ -41,7 +47,7 @@ def list_files(path: str = ".") -> str:
 )
 def read_file(path: str) -> str:
     """读取 UTF-8 文本文件内容。"""
-    target = Path(path)
+    target = ensure_file_access(Path(path))
     if not target.exists():
         return f"文件不存在: {target}"
     if target.is_dir():
@@ -56,6 +62,8 @@ def read_file(path: str) -> str:
 
 def _should_skip(rel: Path) -> bool:
     """跳过隐藏文件/目录与常见构建缓存。"""
+    if is_sensitive_path(rel):
+        return True
     for part in rel.parts:
         if part.startswith("."):
             return True

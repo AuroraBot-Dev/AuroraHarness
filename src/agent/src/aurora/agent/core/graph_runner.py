@@ -1,4 +1,4 @@
-"""委派图人工中断恢复辅助。"""
+"""驱动委派图执行并恢复人工中断。"""
 
 from __future__ import annotations
 

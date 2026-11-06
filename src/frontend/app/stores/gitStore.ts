@@ -2,7 +2,8 @@ import { defineStore } from 'pinia'
 import type { GitDiff, GitStatus, GitView } from '~/types/agent'
 import { runtimeRequest } from '~/utils/runtimeClient'
 
-const keyFor = (sessionId: string, view: GitView, runId?: string | null) => `${sessionId}:${view}:${runId ?? ''}`
+const keyFor = (sessionId: string, view: GitView, runId?: string | null) =>
+  `${sessionId}:${view}:${runId ?? ''}`
 
 export const useGitStore = defineStore('git', {
   state: () => ({
@@ -29,11 +30,16 @@ export const useGitStore = defineStore('git', {
       this.loading = true
       this.error = ''
       try {
-        const status = await runtimeRequest<GitStatus>('git.status', { sessionId, view, ...(runId ? { runId } : {}) })
+        const status = await runtimeRequest<GitStatus>('git.status', {
+          sessionId,
+          view,
+          ...(runId ? { runId } : {}),
+        })
         if (version === this.statusRequestVersions[key]) this.statuses[key] = status
         return status
       } catch (error) {
-        if (version === this.statusRequestVersions[key]) this.error = error instanceof Error ? error.message : String(error)
+        if (version === this.statusRequestVersions[key])
+          this.error = error instanceof Error ? error.message : String(error)
         throw error
       } finally {
         if (version === this.statusRequestVersions[key]) this.loading = false
@@ -46,11 +52,17 @@ export const useGitStore = defineStore('git', {
       this.diffLoading = true
       this.error = ''
       try {
-        const diff = await runtimeRequest<GitDiff>('git.diff', { sessionId, view, path, ...(runId ? { runId } : {}) })
+        const diff = await runtimeRequest<GitDiff>('git.diff', {
+          sessionId,
+          view,
+          path,
+          ...(runId ? { runId } : {}),
+        })
         if (version === this.diffRequestVersions[key]) this.diffs[key] = diff
         return diff
       } catch (error) {
-        if (version === this.diffRequestVersions[key]) this.error = error instanceof Error ? error.message : String(error)
+        if (version === this.diffRequestVersions[key])
+          this.error = error instanceof Error ? error.message : String(error)
         throw error
       } finally {
         if (version === this.diffRequestVersions[key]) this.diffLoading = false
@@ -65,7 +77,9 @@ export const useGitStore = defineStore('git', {
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error)
         throw error
-      } finally { this.rollingBack = false }
+      } finally {
+        this.rollingBack = false
+      }
     },
     clearSession(sessionId: string) {
       this.statuses = Object.fromEntries(
@@ -75,10 +89,14 @@ export const useGitStore = defineStore('git', {
         Object.entries(this.diffs).filter(([key]) => !key.startsWith(`${sessionId}:`)),
       )
       this.statusRequestVersions = Object.fromEntries(
-        Object.entries(this.statusRequestVersions).filter(([key]) => !key.startsWith(`${sessionId}:`)),
+        Object.entries(this.statusRequestVersions).filter(
+          ([key]) => !key.startsWith(`${sessionId}:`),
+        ),
       )
       this.diffRequestVersions = Object.fromEntries(
-        Object.entries(this.diffRequestVersions).filter(([key]) => !key.startsWith(`${sessionId}:`)),
+        Object.entries(this.diffRequestVersions).filter(
+          ([key]) => !key.startsWith(`${sessionId}:`),
+        ),
       )
     },
   },

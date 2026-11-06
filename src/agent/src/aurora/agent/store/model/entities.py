@@ -171,6 +171,7 @@ class Run(Base):
 
     __tablename__ = "runs"
     __table_args__ = (
+        Index("runs_retry_source", "retry_of_run_id"),
         Index("runs_status", "status", unique=False),
         Index("runs_session", "session_id", "created_at", unique=False),
         Index(
@@ -196,7 +197,25 @@ class Run(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     ended_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_of_run_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("runs.id", ondelete="SET NULL")
+    )
+    retry_task_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("tasks.id", ondelete="SET NULL")
+    )
     session: Mapped[ConversationSession] = relationship(foreign_keys=[session_id])
+
+
+class RunCheckpoint(Base):
+    """保存每轮最近一次已提交的恢复状态。"""
+
+    __tablename__ = "run_checkpoints"
+
+    run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class AgentRun(Base):
@@ -280,6 +299,11 @@ class Task(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     tool: Mapped[str] = mapped_column(Text, nullable=False)
     args_json: Mapped[str] = mapped_column(Text, nullable=False)
+    depends_on_json: Mapped[str | None] = mapped_column(Text)
+    blocked_by_json: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'[]'"))
+    retry_of_task_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("tasks.id", ondelete="SET NULL")
+    )
     effort: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     output: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
@@ -314,6 +338,30 @@ class Artifact(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     agent_run: Mapped[AgentRun | None] = relationship(foreign_keys=[agent_run_id])
     run: Mapped[Run] = relationship(foreign_keys=[run_id])
+
+
+class ToolCall(Base):
+    """映射实际通过确认门的工具调用。"""
+
+    __tablename__ = "tool_calls"
+    __table_args__ = (Index("tool_calls_run", "run_id", "started_at"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    task_key: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    input_json: Mapped[str] = mapped_column(Text, nullable=False)
+    output: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    error: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[str] = mapped_column(Text, nullable=False)
+    ended_at: Mapped[str | None] = mapped_column(Text)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
 
 
 class Review(Base):
@@ -389,6 +437,7 @@ class Interaction(Base):
     __tablename__ = "interactions"
     __table_args__ = (
         Index("interactions_run", "run_id", "status", unique=False),
+        Index("interactions_expiry", "status", "expires_at", sqlite_where=text("kind='approval'")),
         UniqueConstraint("run_id", "interrupt_id"),
     )
 
@@ -403,6 +452,9 @@ class Interaction(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     request_json: Mapped[str] = mapped_column(Text, nullable=False)
     response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)

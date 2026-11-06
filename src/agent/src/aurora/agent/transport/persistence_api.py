@@ -1,9 +1,8 @@
-"""数据库管理、历史查询与产物传输协议。"""
+"""处理配置管理、历史查询与产物读取协议。"""
 
 from __future__ import annotations
 
 import base64
-import json
 import re
 
 from sqlalchemy import delete, select
@@ -25,8 +24,9 @@ from ..store.model import (
     Run,
     RunEvent,
     Task,
+    ToolCall,
 )
-from ..store.records import TABLES, decode
+from ..store.records import TABLES, decode, task_links
 
 
 def camel(key):
@@ -50,6 +50,28 @@ class PersistenceApi:
     def __init__(self, runtime):
         self.runtime = runtime
         self.store = runtime.records
+
+    def _tasks(self, condition, session_id=None):
+        """读取完整任务集并在各自角色内解析关联 ID。"""
+        rows = [
+            decode(row)
+            for row in self.store.db.rows(
+                select(Task, AgentRun.run_id, AgentRun.parent_task_id)
+                .join(Task.agent_run)
+                .where(condition)
+                .order_by(Task.created_at)
+            )
+        ]
+        groups = {}
+        for row in rows:
+            groups.setdefault(row["agent_run_id"], {})[row["task_key"]] = row["id"]
+        return [
+            wire(row)
+            | {"parentId": row["parent_task_id"]}
+            | task_links(row, groups[row["agent_run_id"]])
+            | ({"sessionId": session_id} if session_id else {})
+            for row in rows
+        ]
 
     @property
     def capabilities(self):
@@ -96,18 +118,24 @@ class PersistenceApi:
                 select(Run).where(Run.session_id == row["id"]).order_by(Run.created_at)
             )
             result["runs"] = [wire(decode(run)) | {"objective": run["goal"]} for run in runs]
-            result["tasks"] = [
-                wire(decode(task)) | {"sessionId": row["id"], "parentId": task["parent_task_id"]}
-                for task in self.store.db.rows(
-                    select(Task, AgentRun.run_id, AgentRun.parent_task_id)
-                    .join(Task.agent_run)
-                    .join(AgentRun.run)
-                    .where(Run.session_id == row["id"])
-                    .order_by(Task.created_at)
-                )
-            ]
+            result["tasks"] = self._tasks(
+                AgentRun.run_id.in_(select(Run.id).where(Run.session_id == row["id"])), row["id"]
+            )
             result["approvals"] = [
-                wire(decode(item)) | {"sessionId": row["id"], **json.loads(item["request_json"])}
+                wire(decode(item))
+                | {
+                    "sessionId": row["id"],
+                    **self.runtime.approvals.request(item),
+                    "status": (
+                        "approved"
+                        if item["resolution"] == "approved"
+                        else "rejected"
+                        if item["resolution"] == "rejected"
+                        else "expired"
+                        if item["status"] != "pending"
+                        else "pending"
+                    ),
+                }
                 for item in self.store.db.rows(
                     select(Interaction).join(Interaction.run).where(Run.session_id == row["id"])
                 )
@@ -139,7 +167,7 @@ class PersistenceApi:
         if method not in self.capabilities:
             raise ValueError("未知持久化接口")
         if method in {"agent.status", "agent.test"}:
-            from aurora.agent.capability.registry import AgentRegistry
+            from aurora.agent.capability.agent_registry import AgentRegistry
 
             registry = AgentRegistry(self.runtime)
             return registry.status() if method == "agent.status" else registry.test(params["id"])
@@ -209,6 +237,20 @@ class PersistenceApi:
         if method == "run.get":
             run = self.store.get(Run, params["runId"])
             result = wire(run)
+            result["toolCalls"] = [
+                wire(decode(row))
+                for row in self.store.db.rows(
+                    select(ToolCall, Task.id.label("task_id"))
+                    .outerjoin(
+                        Task,
+                        (Task.agent_run_id == ToolCall.agent_run_id)
+                        & (Task.task_key == ToolCall.task_key),
+                    )
+                    .where(ToolCall.run_id == run["id"])
+                    .order_by(ToolCall.started_at, ToolCall.id)
+                )
+            ]
+            result["tasks"] = self._tasks(AgentRun.run_id == run["id"])
             result["agentRuns"] = [
                 wire(decode(row))
                 for row in self.store.db.rows(
@@ -252,14 +294,7 @@ class PersistenceApi:
             return result
         if method == "agentRun.get":
             row = self.store.get(AgentRun, params["agentRunId"])
-            return wire(row) | {
-                "tasks": [
-                    wire(decode(task))
-                    for task in self.store.db.rows(
-                        select(Task).where(Task.agent_run_id == row["id"]).order_by(Task.created_at)
-                    )
-                ]
-            }
+            return wire(row) | {"tasks": self._tasks(Task.agent_run_id == row["id"])}
         if method == "review.get":
             return self.review(params["reviewId"])
         if method == "artifact.get":

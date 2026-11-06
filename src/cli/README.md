@@ -22,7 +22,7 @@ src/cli/
 ├── pyproject.toml          # 分布定义：name = aurora-cli，[project.scripts] aurora = aurora.cli:main
 ├── src/aurora/cli/
 │   ├── main.py             # 解析器构建与分发
-│   ├── workflow.py         # serve/demo/sandbox 共用的中断应答辅助
+│   ├── interactions.py     # serve/demo/sandbox 共用的中断应答辅助
 │   └── commands/           # 每个子命令一个模块
 └── tests/                  # 只放覆盖本层的测试
 ```
@@ -42,6 +42,12 @@ uv run aurora runtime --port 8765     # 浏览器开发用 WebSocket 传输
 ```bash
 uv pip install ./src/cli
 ```
+
+## 运行评估
+
+`uv run aurora eval` 默认在临时工作区运行离线基准。用 `--list` 查看用例，`--case ID` 单独执行，`--json` 输出结构化报告。存在失败用例时命令返回非零退出码。
+
+`uv run aurora eval --live --list` 列出两项文本对照任务。执行 `--live --task summarize_readme --tiers low,high` 时才会调用配置的模型并消耗 token。详见[评估与校准](../agent/src/aurora/eval/Info.md)。
 
 ## 测试
 

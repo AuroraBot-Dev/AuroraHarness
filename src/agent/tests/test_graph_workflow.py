@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from aurora.agent.core import ClarificationDecision, Effort, build_delegation_graph
+from aurora.agent.core import (
+    ClarificationDecision,
+    Effort,
+    PlanValidationError,
+    build_delegation_graph,
+)
 from aurora.agent.tools.base import Tool
 from aurora.eval import JsonlFeedbackStore
 
@@ -149,11 +155,11 @@ def test_feedback_sink_appends_eval_record(tmp_path):
     assert '"node": "feedback"' in content
 
 
-def test_empty_plan_reaches_empty_summary():
+def test_empty_plan_is_rejected_without_claiming_success():
     planner = RecordingPlanner()
     planner.plan = lambda goal: []
     graph = build_delegation_graph(planner, make_tools())
 
-    state = graph.invoke({"goal": "无需执行"})
-    assert state["report"] == ""
-    assert state["trace"][-1] == {"node": "summarize", "detail": "汇总 0 个结果"}
+    with pytest.raises(PlanValidationError) as failure:
+        graph.invoke({"goal": "无需执行"})
+    assert failure.value.code == "EMPTY_PLAN"

@@ -1,35 +1,180 @@
 <script setup lang="ts">
-import { NButton, NIcon, NInput, NTag, NTooltip } from 'naive-ui'
-import { ArrowUp, Paperclip } from '@vicons/tabler'
+import { NButton, NInput } from 'naive-ui'
+import { ArrowUp, Stop } from '~/utils/icons'
 import type { AttachmentRef } from '~/types/agent'
 
-const props = withDefaults(defineProps<{ disabled?: boolean; loading?: boolean; placeholder?: string }>(), { placeholder: '描述你希望 Agent 完成的任务' })
-const emit = defineEmits<{ submit: [objective: string, attachments: AttachmentRef[]]; stop: [] }>()
-const value = ref('')
-const attachments = ref<AttachmentRef[]>([])
-const resolvedPlaceholder = computed(() => props.loading ? '可以停止当前运行，或切换到其他会话' : props.disabled ? '运行时未连接，仍可浏览历史' : props.placeholder)
+const props = withDefaults(
+  defineProps<{
+    disabled?: boolean
+    compact?: boolean
+    loading?: boolean
+    canStop?: boolean
+    stopping?: boolean
+    placeholder?: string
+  }>(),
+  { placeholder: '描述你希望 Agent 完成的任务' },
+)
+const value = defineModel<string>({ default: '' })
+const emit = defineEmits<{
+  submit: [objective: string, attachments: AttachmentRef[]]
+  stop: []
+}>()
+const resolvedPlaceholder = computed(() =>
+  props.stopping
+    ? '正在停止，等待运行时确认…'
+    : props.loading
+      ? 'Aurora 正在处理任务…'
+      : props.placeholder,
+)
 
 function submit() {
   const objective = value.value.trim()
   if (!objective || props.disabled || props.loading) return
-  emit('submit', objective, [...attachments.value]); value.value = ''; attachments.value = []
+  value.value = ''
+  emit('submit', objective, [])
 }
-function onKeydown(event: KeyboardEvent) { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); submit() } }
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault()
+    submit()
+  }
+}
 </script>
 
 <template>
-  <div class="composer-shell" :class="{ disabled }">
-    <div v-if="attachments.length" class="attachments"><NTag v-for="item in attachments" :key="item.id" closable size="small" @close="attachments = attachments.filter((other) => other.id !== item.id)">{{ item.name }}</NTag></div>
-    <NInput v-model:value="value" type="textarea" :autosize="{ minRows: 1, maxRows: 6 }" :placeholder="resolvedPlaceholder" :disabled="disabled" class="composer-input" @keydown="onKeydown" />
+  <div
+    class="composer-shell"
+    :class="{ disabled, compact }"
+  >
+    <div
+      v-if="$slots.context"
+      class="composer-context"
+    >
+      <slot name="context" />
+    </div>
+    <NInput
+      v-model:value="value"
+      :input-props="{ 'aria-label': '任务内容' }"
+      type="textarea"
+      :autosize="{ minRows: 1, maxRows: 8 }"
+      :placeholder="resolvedPlaceholder"
+      :disabled="disabled || loading"
+      class="composer-input"
+      @keydown="onKeydown"
+    />
     <div class="composer-footer">
-      <NTooltip><template #trigger><span><NButton quaternary circle size="small" disabled aria-label="添加文件引用"><template #icon><NIcon :component="Paperclip" /></template></NButton></span></template>当前后端暂不支持附件</NTooltip>
-      <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
-      <NButton v-if="loading" circle secondary size="small" disabled loading aria-label="运行中" />
-      <NButton v-else circle type="primary" size="small" :disabled="disabled || !value.trim()" aria-label="发送" @click="submit"><template #icon><NIcon :component="ArrowUp" /></template></NButton>
+      <NuxtLink
+        to="/prompts"
+        class="prompt-shortcut"
+      >
+        提示词库
+      </NuxtLink>
+      <NButton
+        v-if="loading && canStop"
+        circle
+        secondary
+        size="small"
+        :disabled="disabled || stopping"
+        :loading="stopping"
+        :aria-label="stopping ? '正在停止' : '停止运行'"
+        @click="emit('stop')"
+      >
+        <template #icon><AppIcon :component="Stop" /></template>
+      </NButton>
+      <NButton
+        v-else-if="loading"
+        circle
+        secondary
+        size="small"
+        disabled
+        loading
+        aria-label="运行中"
+      />
+      <NButton
+        v-else
+        circle
+        type="primary"
+        size="small"
+        :disabled="disabled || !value.trim()"
+        aria-label="发送"
+        title="发送（Enter）"
+        @click="submit"
+      >
+        <template #icon><AppIcon :component="ArrowUp" /></template>
+      </NButton>
     </div>
   </div>
 </template>
 
 <style scoped>
-.composer-shell{padding:10px 12px 9px;border:1px solid var(--border);border-radius:16px;background:var(--surface);box-shadow:var(--shadow);transition:border-color 120ms ease}.composer-shell:focus-within{border-color:#a1a1aa}.composer-shell.disabled{box-shadow:none;opacity:.8}.attachments{display:flex;flex-wrap:wrap;gap:6px;padding:0 0 7px}.composer-input :deep(.n-input-wrapper){padding:0!important}.composer-input :deep(.n-input__border),.composer-input :deep(.n-input__state-border){display:none}.composer-input :deep(textarea){padding:3px 2px 8px!important;font-size:14px;line-height:1.55}.composer-footer{display:flex;align-items:center;gap:8px}.composer-hint{flex:1;color:var(--text-muted);font-size:11px}@media(max-width:620px){.composer-hint{display:none}}
+.composer-shell {
+  padding: 14px 16px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  transition: border-color 180ms ease;
+}
+
+.composer-shell:focus-within {
+  border-color: var(--accent);
+}
+
+.composer-shell:not(.compact) {
+  background: var(--glass-fill);
+  border-radius: 24px;
+  box-shadow: var(--material-shadow);
+  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(135%);
+  backdrop-filter: blur(var(--material-blur)) saturate(135%);
+}
+
+.composer-context {
+  margin-bottom: 20px;
+}
+
+.composer-input {
+  background: transparent !important;
+  --n-color-disabled: transparent !important;
+}
+
+.composer-input :deep(.n-input-wrapper) {
+  padding: 0 !important;
+}
+
+.composer-input :deep(.n-input__border),
+.composer-input :deep(.n-input__state-border) {
+  display: none;
+}
+
+.composer-input :deep(textarea) {
+  padding: 3px 2px 12px !important;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.composer-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 6px;
+}
+
+.composer-footer :deep(button:last-child) {
+  margin-left: auto;
+}
+
+.prompt-shortcut {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.prompt-shortcut:hover {
+  color: var(--accent);
+}
+
+@media (max-width: 620px) {
+  .composer-shell {
+    padding: 12px 14px 10px;
+  }
+}
 </style>

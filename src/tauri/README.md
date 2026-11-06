@@ -54,13 +54,22 @@ resources/sidecar/
 └── ...
 ```
 
+Tauri 使用 `{"resources/sidecar/": "sidecar/"}` 显式映射资源目标目录，安装包中的解释器
+位于 `$RESOURCE/sidecar/python/`。直接使用资源路径列表会保留外层 `resources/`，导致代理
+按约定找不到解释器而进入开发态回退。
+
 依赖**必须**合并到解释器自己的 `site-packages`，不能放在旁边再靠 `PYTHONPATH` 暴露：
 `.pth` 文件只在解释器自身的 `site-packages` 里被执行，而 pywin32 正是靠 `pywin32.pth` 的
 bootstrap 注册 DLL 目录；走 `PYTHONPATH` 时它不会运行，Windows 上 `import pywintypes` 会直接
 失败（整个 `mcp` 导入链随之崩掉）。
 
-脚本最后会用打包好的解释器真的导入一次 `aurora.agent` 与 `aurora.cli`：拷贝成功不等于能导入，
-上面这两个坑都是靠这道自检才在构建阶段暴露出来的。
+解释器必须来自 uv 管理的独立 Python，查找时显式排除项目虚拟环境；安装时不创建用户级
+Python 命令链接或 Windows 注册项。复制目录时保留相对符号链接，避免 `bin/python3` 指回
+开发机的 Python。运行时依赖由根 `uv.lock` 冻结导出约束，开发依赖不进入 sidecar。
+
+脚本最后验证打包解释器的 `sys.prefix` 和 `sys.base_prefix` 都指向 sidecar，并实际导入
+`AgentRuntime`、`RuntimeApi` 和 CLI 参数入口。浅层包能导入，不代表重命名后的业务模块或
+依赖能被加载，因此构建自检覆盖完整的入口导入链。
 
 ## 构建与运行
 

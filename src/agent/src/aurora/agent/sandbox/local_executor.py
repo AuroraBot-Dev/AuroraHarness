@@ -1,4 +1,4 @@
-"""跨平台本机文件写入沙箱。"""
+"""按宿主平台选择并驱动本机沙箱执行器。"""
 
 from __future__ import annotations
 

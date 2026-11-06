@@ -18,14 +18,19 @@ def build_mcp_tools(
     for remote in client.list_tools():
         name = f"mcp.{client.config.name}.{remote.name}"
 
-        def invoke(_remote_name: str = remote.name, **kwargs) -> str:
-            """调用绑定的远端 MCP Tool。"""
-            return client.call_tool(_remote_name, kwargs)
+        def bind(remote_name):
+            """冻结远端工具名，不允许模型参数覆盖调用目标。"""
+
+            def invoke(**kwargs) -> str:
+                """调用绑定的远端 MCP Tool。"""
+                return client.call_tool(remote_name, kwargs)
+
+            return invoke
 
         tools[name] = Tool(
             name=name,
             description=remote.description or remote.title or f"调用 {remote.name}",
-            func=invoke,
+            func=bind(remote.name),
             risk=_risk_for(remote, package),
             params_schema=remote.input_schema,
         )

@@ -14,7 +14,11 @@ import ast
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[3]
-SOURCE_ROOTS = [REPO_ROOT / "src" / "agent", REPO_ROOT / "src" / "cli"]
+SOURCE_ROOTS = [
+    REPO_ROOT / "src" / layer / directory
+    for layer in ("agent", "cli")
+    for directory in ("src", "tests")
+]
 
 # `os.open` 返回文件描述符，只做二进制读写，不需要编码。
 _BINARY_ONLY_RECEIVERS = {"os"}

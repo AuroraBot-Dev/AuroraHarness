@@ -1,5 +1,7 @@
 # 能力特化层（Capability / Specialization）
 
+第一版通过 `aurora.agent.capability` 导出策略注册、作用域解析和能力组合接口，接入工作流会话与动态委派。实际规则及扩展示例见 [能力特化与本轮能力清单](../../../../../../docs/capability-specialization.md)。`agent_registry.py` 管理可调用 Agent，`specialization.py` 管理可插拔能力，两者职责独立。
+
 用户特化 Agent 能力的对外接口，与缓存**解耦**（见 ADR-001）。
 
 可插拔的四类能力：

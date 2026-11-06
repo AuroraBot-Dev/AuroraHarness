@@ -23,6 +23,8 @@ class Task(TypedDict):
     effort: Effort
     tool: str
     args: dict[str, object]
+    depends_on: NotRequired[list[str]]
+    source_task_id: NotRequired[str]
 
 
 class Result(TypedDict):
@@ -31,6 +33,7 @@ class Result(TypedDict):
     task_id: str
     ok: bool
     output: str
+    blocked_by: NotRequired[list[str]]
 
 
 class Clarification(TypedDict):

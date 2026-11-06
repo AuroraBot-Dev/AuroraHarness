@@ -2,6 +2,10 @@
 
 形如 CodeX 的全平台桌面 AI Agent：用户把项目交给 Agent，Agent 会自主规划、委派并完成开发任务。
 
+项目仍在实现中，尚未满足文档站的全部要求。核心能力缺口与验收顺序见[文档需求与实现差距](docs/requirements-status.md)。本地构建产物用于验证已有代码，不代表正式发布。
+
+会话现支持「对话 / 调用轨迹」切换：按运行轮次回看真实工具的参数、结果、耗时与错误，并保留停止、审批和来源重试入口。使用方式见[界面指南](docs/customization.md#在对话与调用轨迹间切换)，数据语义见[调用轨迹](docs/database.md#工具调用轨迹)。
+
 本仓库是**单仓分层**的 monorepo。历史上它由 `AuroraAgentBackend` 与 `AuroraAgentFrontend`
 两个独立仓库组成，现已合并到 `src/` 之下，按职责切成五个层次，各层的提交历史都通过
 subtree 合并保留（可 `git log --follow` 追溯）。
@@ -114,6 +118,8 @@ cd src/frontend && pnpm lint && pnpm typecheck && pnpm test
 
 ## 各层文档
 
+想先按自己的方式使用 Aurora，可从[用户定制指南](docs/customization.md)开始：定义 Agent、保存带变量的提示词、组合模型与协作流程，并用十六进制颜色调整界面。
+
 - 文档索引：[`docs/README.md`](docs/README.md)（区分现行文档与历史文档）
 - 前端层：[`src/frontend/README.md`](src/frontend/README.md)
 - Tauri 胶水层：[`src/tauri/README.md`](src/tauri/README.md)
@@ -122,6 +128,7 @@ cd src/frontend && pnpm lint && pnpm typecheck && pnpm test
 - python-cli：[`src/cli/README.md`](src/cli/README.md)
 - 架构与边界：[`docs/architecture.md`](docs/architecture.md)
 - 架构决策记录：[`docs/adr/`](docs/adr/README.md)
+- 能力策略与本轮能力清单：[`docs/capability-specialization.md`](docs/capability-specialization.md)
 
 ## 工作区与锁定文件
 

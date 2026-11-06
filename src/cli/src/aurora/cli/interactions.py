@@ -1,4 +1,4 @@
-"""CLI 委派图交互辅助。"""
+"""收集 CLI 审批、澄清和评价输入。"""
 
 from __future__ import annotations
 

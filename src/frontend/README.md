@@ -5,6 +5,11 @@ Aurora Agent 的界面层：Nuxt 4 + Vue 3 + TypeScript + Naive UI + Pinia，桌
 
 ## 职责边界
 
+界面入口为工作台、Agent、提示词库与设置。用户操作见[自定义指南](../../docs/customization.md)，
+视觉、响应式和组件边界见[界面设计说明](../../docs/interface-design.md)。
+
+会话采用运行画布，可切换「对话 / 调用轨迹」。`TracePanel` 只展示真实调用时间线，单条可展开参数和结果；从对话对应轮次进入。移除轨迹统计、侧栏、阶段、搜索和筛选，文字统一为苹方字体栈。`traceStore` 合并 `run.get` 与 `tool.*` 事件，数据保存在 Python SQLite；审批、停止和重试继续由运行时确认。
+
 属于本层：页面与组件、Pinia store、协议客户端、类型定义、单元测试与 E2E。
 
 不属于本层：
@@ -39,6 +44,10 @@ src/frontend/
 
 两条链路收发的是同一套 protocol v1 信封与事件结构，因此页面代码不需要关心当前处于哪种模式。
 
+危险操作确认卡片显示后端截止时间和倒计时。点击后保持提交状态，收到 `approval.resolved` 或已提交快照才显示结果；本地到期仅禁用按钮，最终超时以后端为准。审批结果随会话刷新恢复，规范接口及兼容规则见[审批期限与确认](../../docs/architecture.md#审批期限与确认)。
+
+失败、取消或中断的运行提供“重试未完成任务”，任务详情抽屉提供“重试此任务”。后端返回新运行后才显示进度，并保留可跳转的来源关系；当前会话活动、提交中或运行时断开时禁用重试。重试仍按当前策略重新审批，旧运行和任务保持原状态。
+
 ## 开发
 
 在仓库根先装依赖（`node scripts/tasks.mjs setup`），然后：
@@ -69,6 +78,8 @@ VITE_RUNTIME_WS=ws://127.0.0.1:8765/ws pnpm dev
 
 ```bash
 pnpm lint
+pnpm format:check
+pnpm format           # 格式化应用源码
 pnpm typecheck
 pnpm test:coverage
 pnpm test:e2e
@@ -79,6 +90,11 @@ pnpm generate          # 生成 .output/public，供 Tauri 打包
 该脚本负责把路径显式告诉它，细节见 [`docs/architecture.md`](../../docs/architecture.md)。
 
 ## 说明
+
+- 统一使用 Phosphor 图标，经 `AppIcon` 和 `app/utils/icons.ts` 引用；默认细线，导航选中时填充。
+- 字体优先使用系统苹方；主题和十六进制强调色保存在本地，CSS 与组件主题使用同一份配色。
+- 提示词库在浏览器 / WebView 本地存储；变量预览与 JSON 导入导出不依赖运行时。
+- Prettier 统一 Vue、TypeScript 与 CSS 格式；根任务 `lint` / `fmt` 包含前端格式检查 / 修复。
 
 - 请使用 **pnpm 11**：`patches/` 下的补丁文件在 pnpm 12 上会因更严格的解析而安装失败。
   `node scripts/tasks.mjs` 检测到其他大版本时会自动改用 `npx pnpm@11`。

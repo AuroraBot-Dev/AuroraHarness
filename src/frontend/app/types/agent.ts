@@ -3,8 +3,9 @@ import type { PROTOCOL_VERSION } from '~/utils/protocol'
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'restarting'
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type TaskEffort = 'low' | 'medium' | 'high'
-export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
-export type RunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+export type TaskStatus = RunStatus | 'blocked'
+export type RunStatus =
+  'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 export type SessionStatus = 'idle' | RunStatus
 
 export interface AttachmentRef {
@@ -22,7 +23,7 @@ export interface ConversationMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   createdAt: string
-  status: 'streaming' | 'completed' | 'failed'
+  status: 'streaming' | 'completed' | 'failed' | 'cancelled'
   kind: 'message' | 'report' | 'error' | 'tool'
   agentRunId?: string | null
   visibility?: 'public' | 'internal'
@@ -35,10 +36,14 @@ export interface TaskNode {
   sessionId: string
   runId: string
   parentId: string | null
+  dependsOn: string[]
+  blockedBy: string[]
+  retryOfTaskId?: string | null
   description: string
   tool: string
   effort: TaskEffort
   status: TaskStatus
+  statusInferred?: boolean
   output: string
   error: string
   createdAt?: string
@@ -84,6 +89,10 @@ export interface SessionRecord {
 
 export interface ApprovalRequest {
   id: string
+  approvalId?: string
+  expiresAt?: string | null
+  resolvedAt?: string | null
+  resolution?: string | null
   sessionId: string
   runId: string
   taskId?: string | null
@@ -168,7 +177,11 @@ export interface WireRequest {
   params: Record<string, unknown>
 }
 
-export interface WireError { code: string; message: string; details?: unknown }
+export interface WireError {
+  code: string
+  message: string
+  details?: unknown
+}
 export interface WireResponse<T = unknown> {
   protocol_version: typeof PROTOCOL_VERSION
   request_id: string

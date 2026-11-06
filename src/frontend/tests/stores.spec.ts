@@ -121,7 +121,7 @@ describe('persistent session history', () => {
 describe('approval responsiveness', () => {
   beforeEach(() => { setActivePinia(createPinia()); vi.mocked(runtimeRequest).mockReset() })
 
-  it('acknowledges clicks immediately, blocks duplicates and restores rejected submissions', async () => {
+  it('keeps the gate pending while submitting, blocks duplicates and allows failed submission retries', async () => {
     const { useRuntimeStore } = await import('~/stores/runtimeStore')
     const runtime = useRuntimeStore()
     const sessions = useSessionStore()
@@ -130,8 +130,9 @@ describe('approval responsiveness', () => {
     let rejectRequest!: (error: Error) => void
     vi.mocked(runtimeRequest).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject }))
     const submission = runtime.resolveApproval('confirm', true)
-    expect(runtime.approvalsFor('s')).toHaveLength(0)
-    expect(sessions.getSession('s')?.status).toBe('running')
+    expect(runtime.approvalsFor('s')).toHaveLength(1)
+    expect(runtime.pendingInputs.confirm).toBeDefined()
+    expect(sessions.getSession('s')?.status).toBe('waiting')
     await runtime.resolveApproval('confirm', true)
     expect(runtimeRequest).toHaveBeenCalledTimes(1)
     rejectRequest(new Error('提交失败'))
@@ -148,6 +149,7 @@ describe('approval responsiveness', () => {
     let rejectRequest!: (error: Error) => void
     vi.mocked(runtimeRequest).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject }))
     const submission = runtime.resolveApproval('confirm', true)
+    await runtime.handleEvent({ protocol_version: 1, event_id: 'resolved', type: 'approval.resolved', occurred_at: '', session_id: 's', run_id: 'r', payload: { interrupt_id: 'confirm', approved: true, resolution: 'approved', resolved_at: '2026-11-06T00:00:00Z' } })
     await runtime.handleEvent({ protocol_version: 1, event_id: 'resumed', type: 'run.resumed', occurred_at: '', session_id: 's', run_id: 'r', payload: {} })
     rejectRequest(new Error('执行失败'))
     await expect(submission).rejects.toThrow('执行失败')

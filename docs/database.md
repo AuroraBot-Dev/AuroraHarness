@@ -10,7 +10,7 @@ uv run playwright install chromium
 uv run aurora runtime --port 8765
 ```
 
-数据库默认位置：macOS 为 `~/Library/Application Support/Aurora/aurora.db`，Windows 为 `%LOCALAPPDATA%/Aurora/aurora.db`，Linux 为 `$XDG_DATA_HOME/Aurora/aurora.db`（默认 `~/.local/share`）。通过 `AURORA_DATABASE_PATH` 指定其他位置。一个数据库同时只允许一个运行时持有；桌面端和独立 CLI 不应同时接管同一个数据库。
+数据库默认保存在仓库根的 `.aurora/aurora.db`，浏览器与桌面开发共用。独立安装或打包运行时若无法定位源码仓库，则使用当前工作目录下的 `.aurora/aurora.db`。通过 `AURORA_DATABASE_PATH` 指定其他位置。一个数据库同时只允许一个运行时持有；桌面端和独立 CLI 不应同时接管同一个数据库。
 
 初次启动从环境变量导入默认配置，未设置模型时保存 `unconfigured`，仍可浏览配置和历史，但执行前必须配置有效模型。数据库已有配置时不会被 `.env` 覆盖。
 
@@ -26,7 +26,7 @@ uv run aurora runtime --port 8765
 
 ## 实体和约束
 
-SQL 是完整的结构定义：`src/agent/src/aurora/agent/store/migrations/001_initial.sql`。
+完整结构由 `src/agent/src/aurora/agent/store/migrations/` 中的版本化 SQL 定义。`001` 为初始结构，`002` 增加 Agent 注册及委派，`003` 增加审批期限和解决元数据，`004` 增加运行与任务重试来源。
 
 - `projects`、`sessions`、`messages` 管理工作区及对话；消息按会话内序号排序，分为公共消息和角色内部交接。
 - `model_providers` → `model_configs` → `agents` 管理连接与角色；`workflows`、`workflow_steps` 固定阶段与角色绑定。
@@ -34,6 +34,10 @@ SQL 是完整的结构定义：`src/agent/src/aurora/agent/store/migrations/001_
 - `artifacts` 保存截图、代码差异及预览日志的路径、哈希和来源；文件在数据库旁的 `artifacts/运行UUID/` 中。产物读取验证路径归属和 SHA-256。
 - `reviews`、`review_artifacts`、`review_findings` 记录审查结论、证据及问题，不覆盖旧轮次。问题只可引用本轮截图，历史问题关联只可指向同一运行。
 - `interactions` 保存审批、澄清、评价和返修决策；`run_events` 保存有序阶段轨迹；其余表用于设置、迁移和旧数据导入。
+
+危险操作审批额外保存 `expires_at`、`resolved_at`、`resolution`；批准/拒绝为 resolved，超时、取消及重启失效为 expired，并保存明确的布尔拒绝结果。截止时间与解决事件持久化，更新后的页面从数据库恢复展示，不能将过期记录再次提交。旧版历史响应保留，缺失的历史元数据不伪造。
+
+重试运行通过 `retry_of_run_id` 关联来源运行，局部重试额外保存 `retry_task_id`，新任务的 `retry_of_task_id` 关联原任务。来源记录不可被新运行改写；外键的 SET NULL 删除语义允许完整会话级联清理。角色输入及配置快照保存本轮实际权限、重试作用域与保留结果引用；图片复制后属于新运行，同时保留原产物来源。
 
 唯一约束保证：同会话一个活动运行、请求键去重、阶段轮次不重复、工具任务 ID 不跨 Agent 执行冲突。外键启用，写事务使用 `BEGIN IMMEDIATE`；模型调用和工具运行不持有写事务。迁移在单一事务中更新结构和版本，失败一起回滚。
 
@@ -54,6 +58,8 @@ SQL 是完整的结构定义：`src/agent/src/aurora/agent/store/migrations/001_
 - `session.list/get/update/delete/clear`：`sessionId` 定位会话；更新支持 `title`、`workflowId`、`archived`。`session.close` 只释放资源，不删除记录。
 - `session.create`：保留 `workspacePath`、沙箱和审批配置，增加 `title`、`workflowId`。
 - `run.start`：`sessionId`、`goal`、可选 `workflowId`、`requestKey`、`mode`（`run/say/plan`）。同一请求键返回已登记运行，不再次执行。
+- `run.retry`：`session_id`、`run_id`、可选 `task_id`；新建来源关联运行并立即返回 `{run}`，后续执行使用相同事件通道。整轮重试跳过已完成任务，局部重试只覆盖指定范围；详见[运行与任务重试](architecture.md#运行与任务重试)。
+- `approval.resolve`：`session_id`、`run_id`、`approval_id`、布尔 `approved`；接受后立即返回 `{accepted:true}`，通过 `approval.resolved` 确认批准、拒绝或超时。重复、未知和过期审批返回明确错误。默认期限 300 秒，详见[审批期限与确认](architecture.md#审批期限与确认)。
 - `message.list`：`sessionId`、`beforeSeq`、`limit`（默认 50，上限 200）；返回正序消息和 `nextBeforeSeq`。
 - `run.get`、`agentRun.get`、`review.get`：读取运行、角色执行和审查详情。
 - `artifact.get`：传 `artifactId`，返回元数据和 base64 文件内容。
@@ -65,13 +71,29 @@ SQL 是完整的结构定义：`src/agent/src/aurora/agent/store/migrations/001_
 
 `run.resume` 继续使用 `sessionId`、`runId`、`interruptId`、`response`。流程级决策支持 `{action:"accept"|"cancel"|"retry"}`；达到返修上限后的 `retry` 表示用户明确追加一轮。无法审查后的 `retry` 只重新截图及审查，不重复编写。
 
+## 任务依赖
+
+迁移 007 为任务保存同角色计划中的前置键和直接阻断来源。未声明依赖的旧记录使用 NULL，声明独立任务使用空数组。会话、运行、角色详情与实时事件均用同一批任务 UUID 返回 `dependsOn` 和 `blockedBy`。依赖未通过的任务记录为 `blocked`，没有审批或工具调用。
+
+## 工具调用轨迹
+
+迁移 `005_tool_calls.sql` 增加 `tool_calls`。每次通过确认门后的实际叶子工具调用有独立 UUID，关联运行、角色执行和规划任务键；`run.get` 返回 `toolCalls` 并关联持久任务 ID。委派本身由角色与任务树表示，不伪造成一次叶子调用。
+
+事件为 `tool.started/completed/failed/cancelled/interrupted`，由运行时通知通道广播，并写入审计序列。事件使用 `tool_call_id` 定位，记录结构化输入、文本输出/错误、UTC 起止时间和单调时钟测得的 `duration_ms`。等待或拒绝审批不创建记录；工具非零退出和超时均记录失败，取消记录独立终态。重试产生新运行及新调用，不修改来源轨迹。
+
+前端按调用 ID 合并快照与事件，迟到的执行中快照不能覆盖终态。结构化敏感字段和已配置供应商凭据在入库及推送前脱敏；这不代表所有任意文本及外部工具的凭据安全边界已完成，B10 的验收仍未结束。
+
+运行时重启将遗留的执行中调用标记中断，恢复时间仅用于标记已结束，`duration_ms` 保持未知，不能把进程停机时长算成工具耗时。调用记录随运行和会话级联删除。
+
 ## 历史和重启
 
 公共上下文包含用户输入、澄清和最终结果；角色内部指令和交接不会无差别分享。每次执行保存历史消息引用及产物引用。默认上下文预算 8000 tokens，使用 UTF-8 字节上界进行保守估算，按完整公共轮次裁剪历史；过大的当前输入和交接明确报错。图片按实际内容提交，模型服务的图片计费和窗口限制仍以供应商为准。
 
 `/clear` 和 `session.clear` 推进上下文边界，保留历史展示。CLI 可使用 `uv run aurora serve --session-id <UUID>` 继续同一会话。
 
-重启后遗留活动运行、Agent 执行和工具任务变为 `interrupted`，待处理输入过期。不会恢复旧工具、旧审批或临时 Git 回滚。查看历史无需工作区在线；新一轮执行时才验证并重建工作区资源。
+迁移 006 的 `run_checkpoints` 在等待人工输入时记录当前执行位置，和待处理输入在同一事务中提交。SQLite 保存图状态、已完成任务的结果、结构预算和 Git 包摘要。Git 基线存放在工作树外的运行专用目录，恢复或中断后随运行收束清理。
+
+启动时核对 Git 可见的工作树、索引和分支，以及角色权限、配置和待处理输入。Git 忽略的文件和外部服务的状态超出这项核对范围。校验通过的运行保留原 ID，通过 `session.get` 读取换发的输入标识后继续。审批沿用原截止时间，过期会拒绝操作。准备继续执行时还会在工作区锁内复核。执行工具时崩溃、工作区发生变化、检查点损坏或缺失时，遗留运行标为 `interrupted`，可从历史发起重试。
 
 ## 验证
 
