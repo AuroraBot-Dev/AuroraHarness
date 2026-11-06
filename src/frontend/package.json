@@ -17,13 +17,15 @@
     "test:e2e": "playwright test",
     "test:watch": "vitest",
     "postinstall": "nuxt prepare",
-    "tauri": "node ../tauri/scripts/tauri.mjs"
+    "tauri": "node ../tauri/scripts/tauri.mjs",
+    "format": "prettier --write app",
+    "format:check": "prettier --check app"
   },
   "dependencies": {
+    "@phosphor-icons/vue": "^2.2.1",
     "@pinia/nuxt": "^1.0.2",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.4.2",
-    "@vicons/tabler": "^0.13.0",
     "dompurify": "^3.4.14",
     "markdown-it": "^14.1.0",
     "naive-ui": "^2.45.2",
@@ -41,6 +43,7 @@
     "eslint": "^10.9.1",
     "happy-dom": "^20.11.6",
     "lefthook": "^2.1.10",
+    "prettier": "^3.9.10",
     "typescript": "^5.7.3",
     "vitest": "^4.1.11",
     "vue-tsc": "^3.3.11"

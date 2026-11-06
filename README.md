@@ -114,6 +114,8 @@ cd src/frontend && pnpm lint && pnpm typecheck && pnpm test
 
 ## 各层文档
 
+想先按自己的方式使用 Aurora，可从[用户定制指南](docs/customization.md)开始：定义 Agent、保存带变量的提示词、组合模型与协作流程，并用十六进制颜色调整界面。
+
 - 文档索引：[`docs/README.md`](docs/README.md)（区分现行文档与历史文档）
 - 前端层：[`src/frontend/README.md`](src/frontend/README.md)
 - Tauri 胶水层：[`src/tauri/README.md`](src/tauri/README.md)

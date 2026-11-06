@@ -5,6 +5,9 @@ Aurora Agent 的界面层：Nuxt 4 + Vue 3 + TypeScript + Naive UI + Pinia，桌
 
 ## 职责边界
 
+界面入口为工作台、Agent、提示词库与设置。用户操作见[自定义指南](../../docs/customization.md)，
+视觉、响应式和组件边界见[界面设计说明](../../docs/interface-design.md)。
+
 属于本层：页面与组件、Pinia store、协议客户端、类型定义、单元测试与 E2E。
 
 不属于本层：
@@ -69,6 +72,8 @@ VITE_RUNTIME_WS=ws://127.0.0.1:8765/ws pnpm dev
 
 ```bash
 pnpm lint
+pnpm format:check
+pnpm format           # 格式化应用源码
 pnpm typecheck
 pnpm test:coverage
 pnpm test:e2e
@@ -79,6 +84,11 @@ pnpm generate          # 生成 .output/public，供 Tauri 打包
 该脚本负责把路径显式告诉它，细节见 [`docs/architecture.md`](../../docs/architecture.md)。
 
 ## 说明
+
+- 统一使用 Phosphor 图标，经 `AppIcon` 和 `app/utils/icons.ts` 引用；默认细线，导航选中时填充。
+- 字体优先使用系统苹方；主题和十六进制强调色保存在本地，CSS 与组件主题使用同一份配色。
+- 提示词库在浏览器 / WebView 本地存储；变量预览与 JSON 导入导出不依赖运行时。
+- Prettier 统一 Vue、TypeScript 与 CSS 格式；根任务 `lint` / `fmt` 包含前端格式检查 / 修复。
 
 - 请使用 **pnpm 11**：`patches/` 下的补丁文件在 pnpm 12 上会因更严格的解析而安装失败。
   `node scripts/tasks.mjs` 检测到其他大版本时会自动改用 `npx pnpm@11`。

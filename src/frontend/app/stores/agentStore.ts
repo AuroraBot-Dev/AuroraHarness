@@ -1,4 +1,4 @@
-import { ref } from "vue"
+import { ref } from 'vue'
 
 import { defineStore } from 'pinia'
 import type { AgentConfig, AgentStatus, ModelConfig } from '~/types/workflow'
@@ -38,11 +38,16 @@ export const useAgentStore = defineStore('agents', () => {
     } catch (cause) {
       connected.value = false
       error.value = String(cause)
-    } finally { loading.value = false }
+    } finally {
+      loading.value = false
+    }
   }
 
   async function save(id: string, data: Record<string, unknown>) {
-    const result = await runtimeRequest<AgentConfig>(id ? 'agent.update' : 'agent.create', { id: id || undefined, data })
+    const result = await runtimeRequest<AgentConfig>(id ? 'agent.update' : 'agent.create', {
+      id: id || undefined,
+      data,
+    })
     await refresh()
     return result
   }

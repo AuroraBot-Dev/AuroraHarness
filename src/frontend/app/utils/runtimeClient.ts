@@ -5,7 +5,10 @@ import { PROTOCOL_VERSION } from '~/utils/protocol'
 
 type EventHandler = (event: RuntimeEvent) => void
 const handlers = new Set<EventHandler>()
-const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>()
+const pending = new Map<
+  string,
+  { resolve: (value: unknown) => void; reject: (reason: Error) => void }
+>()
 let socket: WebSocket | null = null
 let tauriUnlisten: UnlistenFn | null = null
 let connectPromise: Promise<void> | null = null
@@ -33,7 +36,10 @@ export async function connectRuntime(): Promise<void> {
   if (connectPromise) return connectPromise
   connectPromise = (async () => {
     if (isTauri()) {
-      if (!tauriUnlisten) tauriUnlisten = await listen<RuntimeEvent>('runtime-event', ({ payload }) => receive(payload))
+      if (!tauriUnlisten)
+        tauriUnlisten = await listen<RuntimeEvent>('runtime-event', ({ payload }) =>
+          receive(payload),
+        )
       return
     }
     if (socket?.readyState === WebSocket.OPEN) return
@@ -42,25 +48,44 @@ export async function connectRuntime(): Promise<void> {
       socket.onopen = () => resolve()
       socket.onerror = () => reject(new Error('无法连接开发运行时'))
       socket.onmessage = ({ data }) => {
-        try { receive(JSON.parse(String(data))) } catch { /* 丢弃非协议帧 */ }
+        try {
+          receive(JSON.parse(String(data)))
+        } catch {
+          /* 丢弃非协议帧 */
+        }
       }
       socket.onclose = () => {
         socket = null
         for (const waiter of pending.values()) waiter.reject(new Error('运行时连接已断开'))
         pending.clear()
-        handlers.forEach((handler) => handler({
-          protocol_version: PROTOCOL_VERSION, event_id: `evt_${crypto.randomUUID()}`, type: 'runtime.disconnected',
-          occurred_at: new Date().toISOString(), payload: {},
-        }))
+        handlers.forEach((handler) =>
+          handler({
+            protocol_version: PROTOCOL_VERSION,
+            event_id: `evt_${crypto.randomUUID()}`,
+            type: 'runtime.disconnected',
+            occurred_at: new Date().toISOString(),
+            payload: {},
+          }),
+        )
       }
     })
-  })().finally(() => { connectPromise = null })
+  })().finally(() => {
+    connectPromise = null
+  })
   return connectPromise
 }
 
-export async function runtimeRequest<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+export async function runtimeRequest<T>(
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<T> {
   await connectRuntime()
-  const request: WireRequest = { protocol_version: PROTOCOL_VERSION, request_id: requestId(), method, params }
+  const request: WireRequest = {
+    protocol_version: PROTOCOL_VERSION,
+    request_id: requestId(),
+    method,
+    params,
+  }
   if (isTauri()) {
     const response = await invoke<WireResponse<T>>('runtime_request', { request })
     if (!response.ok) throw new Error(response.error?.message ?? '运行时请求失败')
@@ -74,7 +99,10 @@ export async function runtimeRequest<T>(method: string, params: Record<string, u
 }
 
 export async function restartRuntimeBroker(): Promise<void> {
-  if (isTauri()) { await invoke('runtime_restart'); return }
+  if (isTauri()) {
+    await invoke('runtime_restart')
+    return
+  }
   socket?.close()
   socket = null
   await connectRuntime()

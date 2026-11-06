@@ -1,139 +1,165 @@
 <script setup lang="ts">
-import { NLayout, NLayoutContent, NLayoutSider } from "naive-ui";
+import { ChevronLeft, ChevronRight } from '~/utils/icons'
 
-const ui = useUiStore();
-const compact = ref(false);
-const collapsed = computed(() => compact.value || ui.sidebarCollapsed);
-const edgeLeft = computed(() => `${8 + (collapsed.value ? 68 : 280) - 6}px`);
-let compactQuery: MediaQueryList | null = null;
+const ui = useUiStore()
+const route = useRoute()
+const compact = ref(false)
+const collapsed = computed(() => compact.value || ui.sidebarCollapsed)
+const isCanvas = computed(() => route.path === '/' || route.path.startsWith('/projects/'))
+let compactQuery: MediaQueryList | null = null
 
 function syncCompact(event?: MediaQueryListEvent) {
-  compact.value = event?.matches ?? compactQuery?.matches ?? false;
+  compact.value = event?.matches ?? compactQuery?.matches ?? false
 }
 
 onMounted(() => {
-  compactQuery = window.matchMedia("(max-width: 860px)");
-  syncCompact();
-  compactQuery.addEventListener("change", syncCompact);
-});
-
-onBeforeUnmount(() => compactQuery?.removeEventListener("change", syncCompact));
+  compactQuery = window.matchMedia('(max-width: 860px)')
+  syncCompact()
+  compactQuery.addEventListener('change', syncCompact)
+})
+onBeforeUnmount(() => compactQuery?.removeEventListener('change', syncCompact))
 </script>
 
 <template>
-  <NLayout class="app-shell" has-sider>
-    <NLayoutSider
-      class="app-sider"
-      :width="collapsed ? 68 : 280"
-      :native-scrollbar="false"
-      content-style="height: 100%;"
-      bordered
-    >
+  <div
+    class="app-shell"
+    :class="{ 'is-collapsed': collapsed, 'is-canvas': isCanvas }"
+  >
+    <CanvasAtmosphere />
+    <div class="app-sider">
       <AppSidebar :collapsed="collapsed" />
-    </NLayoutSider>
-    <div
-      v-if="!compact"
-      class="sidebar-edge"
-      :style="{ left: edgeLeft }"
-      role="button"
-      tabindex="0"
-      :aria-label="collapsed ? '展开菜单' : '收起菜单'"
-      :aria-expanded="!collapsed"
-      @click="ui.toggleSidebar"
-      @keydown.enter.prevent="ui.toggleSidebar"
-      @keydown.space.prevent="ui.toggleSidebar"
-    >
-      <span />
+      <button
+        v-if="!compact"
+        class="sidebar-toggle"
+        :aria-label="collapsed ? '展开菜单' : '收起菜单'"
+        :aria-expanded="!collapsed"
+        @click="ui.toggleSidebar"
+      >
+        <AppIcon
+          :component="collapsed ? ChevronRight : ChevronLeft"
+          :size="14"
+        />
+      </button>
     </div>
-    <NLayoutContent
-      class="app-content"
-      content-style="height: 100%; overflow: hidden;"
-    >
-      <slot />
-    </NLayoutContent>
-  </NLayout>
+    <div class="app-content"><slot /></div>
+  </div>
 </template>
 
 <style scoped>
 .app-shell {
   position: relative;
-  width: 100vw;
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  width: 100%;
   height: 100vh;
   height: 100dvh;
-  padding: 8px;
-  gap: 8px;
-  background: var(--shell-bg);
+  isolation: isolate;
+  background: var(--app-bg);
   overflow: hidden;
 }
 
-.sidebar-edge {
-  position: absolute;
-  top: 16px;
-  bottom: 16px;
-  z-index: 10;
-  display: grid;
-  width: 12px;
-  place-items: center;
-  cursor: pointer;
-  outline: none;
+.app-shell.is-collapsed {
+  grid-template-columns: 72px minmax(0, 1fr);
 }
 
-.sidebar-edge span {
-  width: 1px;
-  height: 42px;
-  border-radius: 1px;
-  background: transparent;
-  transition:
-    background 120ms ease,
-    height 120ms ease;
+.app-shell > :deep(.canvas-atmosphere) {
+  opacity: 0.38;
+  transition: opacity 300ms ease;
 }
-.sidebar-edge:hover span,
-.sidebar-edge:focus-visible span {
-  height: 64px;
-  background: var(--text-muted);
+
+.app-shell.is-canvas > :deep(.canvas-atmosphere) {
+  opacity: 1;
 }
 
 .app-sider {
-  height: calc(100vh - 16px);
-  height: calc(100dvh - 16px);
-  border: 1px solid var(--glass-border) !important;
-  border-radius: 16px;
-  background: var(--sidebar-glass) !important;
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(22px) saturate(125%);
-  -webkit-backdrop-filter: blur(22px) saturate(125%);
-  overflow: hidden;
+  position: relative;
+  z-index: 2;
+  min-height: 0;
+  background: var(--sidebar-glass);
+  -webkit-backdrop-filter: blur(var(--material-blur)) saturate(135%);
+  backdrop-filter: blur(var(--material-blur)) saturate(135%);
 }
 
-.app-sider :deep(.n-layout-sider-scroll-container) {
-  height: 100%;
+.app-sider::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: linear-gradient(
+    transparent,
+    var(--glass-edge) 18%,
+    var(--glass-edge) 82%,
+    transparent
+  );
+  content: '';
+  pointer-events: none;
+}
+
+.sidebar-toggle {
+  position: absolute;
+  top: 37px;
+  right: 12px;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
   background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.sidebar-toggle:hover {
+  background: var(--surface-hover);
+}
+
+.is-collapsed .sidebar-toggle {
+  top: 90px;
+  right: 23px;
+}
+
+.is-collapsed .app-sider :deep(.primary-nav) {
+  padding-top: 44px;
 }
 
 .app-content {
+  position: relative;
+  z-index: 1;
   min-width: 0;
-  margin-left: 8px;
-  height: calc(100vh - 16px);
-  height: calc(100dvh - 16px);
-  border: 1px solid var(--glass-border);
-  border-radius: 16px;
-  background: var(--content-glass);
-  box-shadow: var(--glass-shadow-soft);
+  min-height: 0;
+  background: transparent;
   overflow: hidden;
 }
 
-@media (max-width: 680px) {
-  .app-shell {
-    padding: 5px;
-    gap: 5px;
+@media (max-width: 860px) {
+  .is-collapsed .app-sider :deep(.primary-nav) {
+    padding-top: 8px;
   }
-  .app-content {
-    margin-left: 5px;
+}
+
+@media (max-width: 600px) {
+  .app-shell,
+  .app-shell.is-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) calc(64px + env(safe-area-inset-bottom));
   }
-  .app-sider,
+
+  .app-sider {
+    grid-row: 2;
+    padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: 0 -1px 0 var(--glass-edge);
+  }
+
+  .app-sider::after {
+    display: none;
+  }
+
   .app-content {
-    height: calc(100dvh - 10px);
-    border-radius: 13px;
+    grid-row: 1;
   }
 }
 </style>

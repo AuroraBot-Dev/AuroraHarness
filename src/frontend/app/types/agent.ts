@@ -3,8 +3,10 @@ import type { PROTOCOL_VERSION } from '~/utils/protocol'
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'restarting'
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type TaskEffort = 'low' | 'medium' | 'high'
-export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
-export type RunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+export type TaskStatus =
+  'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+export type RunStatus =
+  'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 export type SessionStatus = 'idle' | RunStatus
 
 export interface AttachmentRef {
@@ -168,7 +170,11 @@ export interface WireRequest {
   params: Record<string, unknown>
 }
 
-export interface WireError { code: string; message: string; details?: unknown }
+export interface WireError {
+  code: string
+  message: string
+  details?: unknown
+}
 export interface WireResponse<T = unknown> {
   protocol_version: typeof PROTOCOL_VERSION
   request_id: string
